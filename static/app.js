@@ -27,9 +27,10 @@ function toast(msg, err) {
   t.textContent = msg; t.className = "toast" + (err ? " err" : "");
   clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.add("hidden"), err ? 7000 : 3000);
 }
-function confirmBox(html, yes = "Да") {
+function confirmBox(html, yes = "Да", okOnly = false) {
   return new Promise((res) => {
     $("#modalBody").innerHTML = html; $("#modalYes").textContent = yes;
+    $("#modalNo").classList.toggle("hidden", okOnly);
     $("#modal").classList.remove("hidden");
     const done = (v) => { $("#modal").classList.add("hidden"); $("#modalYes").onclick = $("#modalNo").onclick = null; res(v); };
     $("#modalYes").onclick = () => done(true); $("#modalNo").onclick = () => done(false);
@@ -61,6 +62,7 @@ async function loadState() {
   APP.profile = s.profile; APP.profiles = s.profiles; APP.dataDir = s.data_dir;
   APP.ver = { version: s.version, date: s.release_date, repo: s.repo, changes: s.changes || [] };
   $("#verFoot").textContent = `Поставки Ozon · версия ${s.version} от ${dmy(s.release_date)}`;
+  document.title = `Поставки Ozon ${s.version}`;
   if (s.import_note) setTimeout(() => toast(`Настройки и ключи перенесены из прошлой версии: ${s.import_note}`), 600);
   $("#shopSel").innerHTML = s.profiles.map((p) => `<option value="${p.id}" ${p.id === s.active ? "selected" : ""}>${esc(p.name)}${p.demo ? " (демо)" : ""}</option>`).join("");
   $("#demoNote").classList.toggle("hidden", !APP.profile.demo);
@@ -427,6 +429,7 @@ $("#createBtn").onclick = async () => {
       matrix: Object.fromEntries(used.map((c) => [String(c.cluster_id), D.matrix[cityKey(c)]])),
       mode: D.tsmode, slot_pref: { date_from: D.ts.d1, date_to: D.ts.d2, time_from: D.ts.t1, time_to: D.ts.t2 },
       dropoff: D.dropoff, pass: Object.assign({}, APP.profile.pass || {}, { enabled: D.passOn }), multi: !!D.multi,
+      source: JSON.parse(JSON.stringify(D)),
     };
     const r = await api("/api/batch/create", body);
     openBatch = r.id; showTab("batches");
@@ -435,8 +438,8 @@ $("#createBtn").onclick = async () => {
 };
 
 /* ================= ПАРТИИ ================= */
-const PHASE = { new: ["ожидает", ""], drafts: ["создаются черновики", "run"], await_slot: ["выберите таймслот", "warn"], supplies: ["создаются заявки", "run"], cargo: ["грузоместа и этикетки", "run"], done: ["готово", "ok"], partial: ["есть ошибки", "err"], error: ["ошибка", "err"], stopped: ["остановлено", "warn"] };
-const SST = { new: ["ожидает", ""], draft: ["черновик…", "run"], draft_ok: ["черновик готов", ""], supply: ["заявка…", "run"], cargo: ["грузоместа…", "run"], labels: ["этикетки…", "run"], pass: ["пропуск…", "run"], done: ["готово", "ok"], error: ["ошибка", "err"], cancelled: ["отменена", ""] };
+const PHASE = { new: ["ожидает", ""], drafts: ["создаются черновики", "run"], await_slot: ["выберите таймслот", "warn"], supplies: ["создаются заявки", "run"], cargo: ["грузоместа и этикетки", "run"], done: ["готово", "ok"], partial: ["есть ошибки", "err"], error: ["ошибка", "err"], stopped: ["остановлено", "warn"], cancelling: ["отменяются заявки…", "run"], cancelled: ["отменена", ""] };
+const SST = { new: ["ожидает", ""], draft: ["черновик…", "run"], draft_ok: ["черновик готов", ""], supply: ["заявка…", "run"], cargo: ["грузоместа…", "run"], labels: ["этикетки…", "run"], pass: ["пропуск…", "run"], done: ["готово", "ok"], error: ["ошибка", "err"], cancelled: ["отменена", ""], cancelling: ["отменяется…", "run"] };
 const tag = (m, k) => { const [t, c] = m[k] || [k, ""]; return `<span class="chip ${c}">${esc(t)}</span>`; };
 
 async function loadBatches() {
@@ -446,7 +449,7 @@ async function loadBatches() {
     $("#batchList").innerHTML = `<div class="page-h"><h1>Партии поставок</h1></div>` + (r.batches.length ? `<div class="blist">` +
       r.batches.map((b) => `<div class="bitem" data-id="${esc(b.id)}">
         <div><div class="t">${esc(b.created)}</div><div class="m">${b.demo ? "демо · " : ""}партия ${esc(b.id)}</div></div>
-        <div>${b.running ? '<span class="chip run">выполняется</span>' : tag(PHASE, b.phase)}</div>
+        <div>${b.phase === "cancelling" || b.phase === "cancelled" ? tag(PHASE, b.phase) : b.running ? '<span class="chip run">выполняется</span>' : tag(PHASE, b.phase)}</div>
         <div><div class="t">${b.done}/${b.cities}</div><div class="m">поставок готово</div></div>
         <div><div class="t">${fmt(b.boxes)}</div><div class="m">коробок</div></div>
         <div><div class="t">${esc(b.slot || "—")}</div><div class="m">таймслот</div></div>
@@ -465,43 +468,49 @@ async function showBatch(id) {
   try { b = (await api("/api/batch", { id })).batch; } catch (e) { toast(e.message, true); return; }
   if (openBatch !== id) return;
   renderBatch(b);
-  if (b.running || ["drafts", "supplies", "cargo"].includes(b.phase)) pollTimer = setTimeout(() => showBatch(id), 1500);
+  if (b.cancel_result && !b.cancel_result.shown && b.phase !== "cancelling") await showCancelResult(b);
+  if (b.running || ["drafts", "supplies", "cargo", "cancelling"].includes(b.phase)) pollTimer = setTimeout(() => showBatch(id), 1500);
   else if (b.phase === "await_slot") pollTimer = setTimeout(() => showBatch(id), 15000);
 }
 
 function renderBatch(b) {
   const ships = b.shipments;
+  const busy = b.running || b.phase === "cancelling";
   const active = ships.filter((s) => !s.cancelled);
   const units = (s) => s.boxes.reduce((a, x) => a + x.qty, 0);
   const done = active.filter((s) => s.status === "done").length;
   const pct = active.length ? Math.round(done / active.length * 100) : 0;
   const slotText = b.chosen_slot_human || (b.mode === "auto" ? `авто: ${b.slot_pref?.date_from} — ${b.slot_pref?.date_to}, ${b.slot_pref?.time_from}–${b.slot_pref?.time_to}` : "выбор вручную");
   let h = `<a class="back" id="backList">← Все партии</a>
-    <div class="card"><div class="bhead"><h2>Партия от ${esc(b.created)}</h2>${b.running ? '<span class="chip run">выполняется</span>' : tag(PHASE, b.phase)}${b.demo ? '<span class="chip plain">демо</span>' : ""}
+    <div class="card"><div class="bhead"><h2>Партия от ${esc(b.created)}</h2>${busy && b.phase !== "cancelling" ? '<span class="chip run">выполняется</span>' : tag(PHASE, b.phase)}${b.demo ? '<span class="chip plain">демо</span>' : ""}
     <div class="actions">
-      ${b.running ? '<button class="btn" id="bStop">Остановить</button>' : ""}
-      ${!b.running && ["error", "partial", "stopped", "new"].includes(b.phase) ? '<button class="btn primary" id="bResume">Продолжить</button>' : ""}
-      ${!b.running && ships.some((s) => s.order_id) ? '<button class="btn soft" id="bSync">Сверить с Озоном</button>' : ""}
+      ${busy && b.phase !== "cancelling" ? '<button class="btn" id="bStop">Остановить</button>' : ""}
+      ${!busy && ["error", "partial", "stopped", "new"].includes(b.phase) ? '<button class="btn primary" id="bResume">Продолжить</button>' : ""}
+      ${!busy && b.phase !== "cancelled" && ships.some((s) => s.order_id && !s.cancelled) ? '<button class="btn soft" id="bSync">Сверить с Озоном</button>' : ""}
+      ${!busy && (b.phase === "cancelled" || b.phase === "error") ? '<button class="btn primary" id="bAgain">Создать заново</button>' : ""}
       <button class="btn soft" id="bFolder">Открыть папку</button>
-      ${!b.running && ships.some((s) => s.order_id && !s.cancelled) ? '<button class="btn danger" id="bCancel">Отменить заявки</button>' : ""}
+      ${b.phase !== "cancelling" && ships.some((s) => s.order_id && !s.cancelled) ? `<button class="btn danger" id="bCancel">${busy ? "Остановить и отменить заявки" : "Отменить заявки"}</button>` : ""}
+      ${!busy && !ships.some((s) => s.order_id && !s.cancelled) ? '<button class="btn ghost" id="bDelete">Удалить из истории</button>' : ""}
     </div></div>
     <div class="meta">
       <div class="k"><span>Заявки</span><b>${b.multi ? `одна на все города${b.order?.order_id ? " · № " + esc(ships.find((s) => s.order_number)?.order_number || b.order.order_id) : ""}` : "отдельно на каждый город"}</b></div>
       <div class="k"><span>Точка отгрузки</span><b>${esc(b.dropoff?.name || "—")}</b></div>
       <div class="k"><span>Таймслот</span><b>${esc(slotText)}</b></div>
       <div class="k"><span>Пропуск</span><b>${b.pass?.enabled ? "оформляется" : "нет"}</b></div>
-      <div class="k"><span>Готово</span><b>${done} из ${active.length}</b></div>
+      <div class="k"><span>${b.phase === "cancelled" ? "Отменено" : "Готово"}</span><b>${b.phase === "cancelled" ? `${ships.length} из ${ships.length}` : `${done} из ${active.length}`}</b></div>
     </div>
     <div class="progress ${pct === 100 ? "ok" : ""}"><i style="width:${pct}%"></i></div>
-    ${b.error ? `<div class="banner err" style="margin:14px 0 0">${esc(b.error)}</div>` : ""}
+    ${b.phase === "cancelling" ? `<div class="banner" style="margin:14px 0 0">Отменяю заявки в Озоне — это займёт до пары минут. Можно не ждать: итог появится здесь.</div>` : ""}
+    ${b.phase === "cancelled" ? `<div class="banner" style="margin:14px 0 0">Все заявки этой партии отменены${b.cancel_result?.at ? " " + esc(b.cancel_result.at) : ""}. Чтобы отправить те же товары снова, нажмите «Создать заново».</div>` : ""}
+    ${b.error && b.phase !== "cancelled" ? `<div class="banner err" style="margin:14px 0 0">${esc(b.error)}</div>` : ""}
     ${ships.some((s) => s.mismatch && !s.cancelled) ? `<div class="banner err" style="margin:14px 0 0"><b>Есть поставки, которые едут не в тот кластер</b> — они отмечены красным. Отмените их кнопкой «Отменить» в строке и создайте эти города заново новой партией.</div>` : ""}</div>`;
 
   if (b.phase === "await_slot" && !b.running) h += slotPicker(b);
 
   h += `<div class="card"><div class="card-h"><div><h2>Поставки</h2></div></div><div class="scroll"><table class="grid"><thead><tr><th>Город</th><th>Кластер в Озоне</th><th>Статус</th><th>Заявка</th><th class="r">Коробок</th><th class="r">Шт</th><th>Таймслот</th><th>Примечания</th><th></th></tr></thead><tbody>` +
-    ships.map((s) => { const cl = s.actual_cluster || s.ozon_cluster_name || s.cluster_name || "—"; return `<tr class="${s.mismatch && !s.cancelled ? "mismatch" : ""}"><td><b>${esc(s.name)}</b></td><td class="small">${esc(cl)}${s.mismatch ? ' <span class="err-text">не тот кластер!</span>' : ""}</td><td>${tag(SST, s.status)}</td><td>${esc(s.order_number || s.order_id || "—")}</td><td class="r">${s.boxes.length}</td><td class="r">${fmt(units(s))}</td><td class="small">${s.slot ? esc(humanSlot(s.slot)) : "—"}</td>
+    ships.map((s) => { const cl = s.actual_cluster || s.ozon_cluster_name || s.cluster_name || "—"; return `<tr class="${s.mismatch && !s.cancelled ? "mismatch" : ""} ${s.cancelled ? "dim" : ""}"><td><b>${esc(s.name)}</b></td><td class="small">${esc(cl)}${s.mismatch ? ' <span class="err-text">не тот кластер!</span>' : ""}</td><td>${tag(SST, s.status)}</td><td>${esc(s.order_number || s.order_id || "—")}</td><td class="r">${s.boxes.length}</td><td class="r">${fmt(units(s))}</td><td class="small">${s.slot ? esc(humanSlot(s.slot)) : "—"}</td>
       <td>${s.error ? `<div class="err-text">${esc(s.error)}</div>` : ""}${(s.warn || []).map((w) => `<div class="warn-text">${esc(w)}</div>`).join("")}</td>
-      <td class="r">${!b.running && !b.multi && s.order_id && !s.cancelled ? `<button class="btn danger sm" data-cancel="${esc(s.cluster_id)}">Отменить</button>` : ""}</td></tr>`; }).join("") + `</tbody></table></div>${b.synced_at ? `<div class="muted small" style="margin-top:8px">Сверено с Озоном ${esc(b.synced_at)}</div>` : ""}</div>`;
+      <td class="r">${!busy && !b.multi && s.order_id && !s.cancelled ? `<button class="btn danger sm" data-cancel="${esc(s.cluster_id)}">Отменить</button>` : ""}</td></tr>`; }).join("") + `</tbody></table></div>${b.synced_at ? `<div class="muted small" style="margin-top:8px">Сверено с Озоном ${esc(b.synced_at)}</div>` : ""}</div>`;
 
   const groups = b.groups || [];
   const files = b.files;
@@ -531,16 +540,24 @@ function renderBatch(b) {
   $$("[data-cancel]").forEach((el) => (el.onclick = async () => {
     const s = ships.find((x) => x.cluster_id === el.dataset.cancel);
     if (!(await confirmBox(`<h3>Отменить заявку «${esc(s.name)}» в Озоне?</h3><p>Заявка ${esc(s.order_number || s.order_id)} будет отменена. Это действие нельзя отменить.</p>`, "Отменить заявку"))) return;
-    try { const r = await api("/api/batch/cancel", { id: b.id, cluster_ids: [s.cluster_id] }); const bad = r.results.filter((x) => !x.ok); toast(bad.length ? `Не удалось: ${bad[0].error}` : "Заявка отменена", !!bad.length); }
+    try { await api("/api/batch/cancel", { id: b.id, cluster_ids: [s.cluster_id] }); }
     catch (e) { toast(e.message, true); }
     showBatch(b.id);
   }));
   $("#bLabelsFolder") && ($("#bLabelsFolder").onclick = () => api("/api/open", { id: b.id, sub: "Этикетки" }).catch((e) => toast(e.message, true)));
   $("#bCancel") && ($("#bCancel").onclick = async () => {
-    if (!(await confirmBox(`<h3>Отменить ${b.multi ? "заявку" : "все заявки"} этой партии в Озоне?</h3><p>Это действие нельзя отменить.</p>`, "Отменить заявки"))) return;
-    try { const r = await api("/api/batch/cancel", { id: b.id }); const bad = r.results.filter((x) => !x.ok); toast(bad.length ? `Не отменены: ${bad.map((x) => x.name).join(", ")}` : "Заявки отменены", !!bad.length); }
+    const n = new Set(ships.filter((s) => s.order_id && !s.cancelled).map((s) => s.order_id)).size;
+    if (!(await confirmBox(`<h3>Отменить ${n === 1 ? "заявку" : `${n} заявок`} этой партии в Озоне?</h3><p>${busy ? "Создание поставок будет остановлено. " : ""}Это действие нельзя отменить.</p>`, "Отменить заявки"))) return;
+    $("#bCancel").disabled = true; $("#bCancel").textContent = busy ? "Останавливаю…" : "Отменяю…";
+    try { await api("/api/batch/cancel", { id: b.id }); }
     catch (e) { toast(e.message, true); }
     showBatch(b.id);
+  });
+  $("#bAgain") && ($("#bAgain").onclick = () => recreate(b));
+  $("#bDelete") && ($("#bDelete").onclick = async () => {
+    if (!(await confirmBox(`<h3>Удалить партию из истории?</h3><p>Партия и её файлы этикеток будут удалены с компьютера. В Озоне ничего не изменится.</p>`, "Удалить"))) return;
+    try { await api("/api/batch/delete", { id: b.id }); toast("Партия удалена"); closeBatch(); loadBatches(); }
+    catch (e) { toast(e.message, true); }
   });
   $$(".slot").forEach((el) => (el.onclick = () => { selSlot = JSON.parse(el.dataset.slot); $$(".slot").forEach((x) => x.classList.toggle("sel", x === el)); $("#slotGo").disabled = false; $("#slotSel").innerHTML = `Выбран: <b>${esc(el.dataset.human)}</b>`; }));
   if (selSlot) { const el = $$(".slot").find((x) => x.dataset.slot === JSON.stringify(selSlot)); if (el) el.click(); }
@@ -549,6 +566,41 @@ function renderBatch(b) {
     await api("/api/batch/slot", { id: b.id, slot: selSlot }); selSlot = null; showBatch(b.id);
   });
   $("#slotRefresh") && ($("#slotRefresh").onclick = async () => { await api("/api/batch/resume", { id: b.id, reset_slot: true }); showBatch(b.id); });
+}
+async function showCancelResult(b) {
+  const r = b.cancel_result;
+  const ok = r.ok || [], bad = r.failed || [], skip = r.skipped || [];
+  const title = !bad.length ? "Заявки на поставку отменены" : ok.length ? "Отменены не все заявки" : "Заявки не отменены";
+  await confirmBox(`<h3>${title}</h3>
+    ${ok.length ? `<p>Отменено заявок в Озоне: <b>${ok.length}</b> — ${ok.map(esc).join(", ")}.</p>` : ""}
+    ${skip.length ? `<p class="muted">Ещё не были созданы и сняты с очереди: ${skip.length} — ${skip.map(esc).join(", ")}.</p>` : ""}
+    ${bad.length ? `<p class="err-text">Не удалось отменить: ${bad.map((x) => `<br>• ${esc(x.name)} — ${esc(x.error)}`).join("")}</p><p class="muted small">Можно нажать «Отменить заявки» ещё раз или отменить их в личном кабинете Озона.</p>` : ""}`, "ОК", true);
+  await api("/api/batch/ack", { id: b.id });
+  if (b.phase === "cancelled") { closeBatch(); loadBatches(); }
+}
+function recreate(b) {
+  const src = b.source;
+  if (src && src.cities) {
+    D = Object.assign(newDraft(), JSON.parse(JSON.stringify(src)), { cv: 2 });
+  } else {                                   // партии из старых версий — собираем из поставок
+    D = newDraft();
+    D.products = b.products.map((p) => ({ sku: p.sku, qty: 0, name: p.name, short: p.short, box_size: p.box_size, multiple: !!(APP.profile.products[p.sku] || {}).multiple }));
+    D.cities = b.shipments.map((s) => ({ name: s.name, cluster_id: s.cluster_id, cluster_name: s.cluster_name, share: 0 }));
+    D.matrix = {}; D.edited = {};
+    for (const s of b.shipments) {
+      D.matrix[s.cluster_id] = {};
+      for (const p of b.products) {
+        const q = s.boxes.filter((x) => x.sku === p.sku).reduce((a, x) => a + x.qty, 0);
+        D.matrix[s.cluster_id][p.sku] = q; D.edited[s.cluster_id + "|" + p.sku] = 1;
+        D.products.find((x) => x.sku === p.sku).qty += q;
+      }
+    }
+    const tot = D.products.reduce((a, p) => a + p.qty, 0) || 1;
+    for (const c of D.cities) c.share = Math.round(Object.values(D.matrix[c.cluster_id]).reduce((a, v) => a + v, 0) / tot * 1000) / 10;
+    D.dropoff = b.dropoff || D.dropoff; D.multi = !!b.multi;
+  }
+  saveDraft(); closeBatch(); showTab("new"); renderNew();
+  toast("Форма заполнена данными партии — проверьте и нажмите «Создать поставки»");
 }
 function fileUrl(b, rel) { return `/files/${encodeURIComponent(b.id)}/${rel.split("/").map(encodeURIComponent).join("/")}`; }
 function humanSlot(s) {

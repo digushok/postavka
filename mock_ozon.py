@@ -261,7 +261,7 @@ class MockOzon:
     def m_v1_cargoes_label_get(self, b):
         op = self.ops[b["operation_id"]]
         op["polls"] += 1
-        if op["polls"] < 2:
+        if op["polls"] < 4:            # этикетки Озон готовит дольше остального
             return {"status": "IN_PROGRESS"}
         return {"status": "SUCCESS", "result": op["result"]}
 
@@ -274,10 +274,23 @@ class MockOzon:
         return {"result": "SUCCESS", "errors": []}
 
     def m_v1_supply_order_cancel(self, b):
-        self.orders[int(b["order_id"])]["state"] = "CANCELLED"
-        return {"operation_id": f"cop-{b['order_id']}"}
+        oid = int(b["order_id"])
+        o = self.orders[oid]
+        o["cancel_tries"] = o.get("cancel_tries", 0) + 1
+        op = f"cop-{oid}-{o['cancel_tries']}"
+        # как у настоящего Озона: часть заявок с первого раза «занята другой операцией»
+        busy = oid % 2 == 1 and o["cancel_tries"] == 1
+        self.ops[op] = {"oid": oid, "busy": busy, "polls": 0}
+        return {"operation_id": op}
 
     def m_v1_supply_order_cancel_status(self, b):
+        op = self.ops[b["operation_id"]]
+        op["polls"] += 1
+        if op["polls"] < 2:
+            return {"status": "IN_PROGRESS"}
+        if op["busy"]:
+            return {"status": "ERROR", "error_reasons": ["OTHER_ASYNCHRONOUS_OPERATION_IN_PROGRESS"]}
+        self.orders[op["oid"]]["state"] = "CANCELLED"
         return {"status": "SUCCESS", "result": {"is_order_cancelled": True}}
 
 

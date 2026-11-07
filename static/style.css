@@ -113,6 +113,7 @@ select { cursor: pointer; }
 .modes input:checked + span { border-color: var(--accent); background: #fbfaff; box-shadow: 0 0 0 1px var(--accent) inset; }
 .modes input:checked + span::before { border-color: var(--accent); background: radial-gradient(var(--accent) 0 4px, #fff 5px); }
 .modes input:focus-visible + span { box-shadow: 0 0 0 3px var(--accent-soft); }
+.card.dim, tr.dim td { opacity: .6; }
 .mismatch td { background: var(--err-soft) !important; }
 
 /* плитки отгрузки */

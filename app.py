@@ -399,6 +399,7 @@ def api_batch_create(b):
         "groups": P.group_boxes({s["cluster_id"]: s["boxes"] for s in shipments}, products,
                                 [s["cluster_id"] for s in shipments], names),
         "log": [], "files": None, "demo": bool(p.get("demo")),
+        "source": b.get("source"),
     }
     os.makedirs(ST.batch_dir(p["id"], bid), exist_ok=True)
     ST.save_batch(p["id"], batch)
@@ -417,6 +418,8 @@ def api_batches(_):
     out = []
     for b in ST.list_batches(pid):
         ships = b["shipments"]
+        if all(s.get("cancelled") for s in ships):      # отменённая партия — показываем её состав
+            ships = [dict(s, cancelled=False) for s in ships]
         out.append({"id": b["id"], "created": b["created"], "title": b.get("title"), "phase": b["phase"],
                     "cities": len([s for s in ships if not s.get("cancelled")]),
                     "boxes": sum(len(s["boxes"]) for s in ships if not s.get("cancelled")),
@@ -473,11 +476,40 @@ def api_batch_stop(b):
 
 
 def api_batch_cancel(b):
+    """Запускает отмену в фоне (если поставки создаются — сначала останавливает)."""
     pid = ST.get_profile()["id"]
+    W.start_cancel(pid, b["id"], b.get("cluster_ids"))
+    return {"started": True}
+
+
+def api_batch_ack(b):
+    """Пользователь увидел итог отмены — больше окно не показываем."""
+    pid = ST.get_profile()["id"]
+    bt = ST.load_batch(pid, b["id"])
+    if bt and bt.get("cancel_result"):
+        bt["cancel_result"]["shown"] = True
+        ST.save_batch(pid, bt)
+    return {"ok": True}
+
+
+def api_batch_delete(b):
+    """Удалить партию из истории — только если в Озоне у неё нет действующих заявок."""
+    import shutil
+    pid = ST.get_profile()["id"]
+    bt = ST.load_batch(pid, b["id"])
+    if not bt:
+        raise OzonError("Партия не найдена")
     if W.is_running(b["id"]):
-        raise OzonError("Сначала остановите выполнение")
-    res = W.cancel_orders(pid, b["id"], b.get("cluster_ids"))
-    return {"results": [{"name": n, "ok": ok, "error": e} for n, ok, e in res]}
+        raise OzonError("Партия ещё выполняется")
+    live = [s["name"] for s in bt["shipments"] if s.get("order_id") and not s.get("cancelled")]
+    if live:
+        raise OzonError("У партии есть неотменённые заявки: " + ", ".join(live))
+    path = os.path.realpath(ST.batch_dir(pid, b["id"]))
+    root = os.path.realpath(os.path.join(ST.DATA, "shops", pid, "batches"))
+    if os.path.dirname(path) != root:
+        raise OzonError("Неверная папка партии")
+    shutil.rmtree(path)
+    return {"ok": True}
 
 
 def api_batch_sync(b):
@@ -521,6 +553,7 @@ ROUTES = {
     "/api/batch": api_batch, "/api/batch/slot": api_batch_slot, "/api/batch/resume": api_batch_resume,
     "/api/batch/stop": api_batch_stop, "/api/batch/cancel": api_batch_cancel,
     "/api/batch/rebuild": api_batch_rebuild,
+    "/api/batch/ack": api_batch_ack, "/api/batch/delete": api_batch_delete,
     "/api/export": api_export, "/api/import": api_import,
     "/api/legacy/find": api_legacy_find, "/api/legacy/import": api_legacy_import, "/api/batch/sync": api_batch_sync, "/api/open": api_open_folder,
 }
@@ -587,15 +620,38 @@ class H(BaseHTTPRequestHandler):
             self._send(500, {"error": f"Внутренняя ошибка: {e}"})
 
 
+def _call(port, path, timeout=3):
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=b"{}", method="POST",
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
 def already_running(port):
-    """Если программа уже запущена — вернёт True (её сервер отвечает на этом порту)."""
+    """True, если на порту уже работает эта же версия программы.
+
+    Если там работает другая (старая) версия — просим её закрыться, чтобы запустилась новая.
+    Старая версия не закроется, только если у неё прямо сейчас создаются поставки."""
     try:
-        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/ping", data=b"{}", method="POST",
-                                     headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=2) as r:
-            return json.loads(r.read().decode("utf-8")).get("app") == "ozon-supplies"
+        info = _call(port, "/api/ping", 2)
     except Exception:
         return False
+    if info.get("app") != "ozon-supplies":
+        return False
+    if info.get("version") == VERSION:
+        return True
+    print(f"Запущена версия {info.get('version')} — закрываю её, запускаю {VERSION}")
+    try:
+        _call(port, "/api/quit", 5)
+    except Exception:
+        return True            # старая версия занята созданием поставок — открываем её
+    for _ in range(40):
+        time.sleep(0.25)
+        try:
+            _call(port, "/api/ping", 1)
+        except Exception:
+            return False       # порт освободился
+    return True
 
 
 def main():
