@@ -511,7 +511,7 @@ function renderBatch(b) {
 
   h += `<div class="card"><div class="card-h"><div><h2>Поставки</h2></div></div><div class="scroll"><table class="grid"><thead><tr><th>Город</th><th>Кластер в Озоне</th><th>Статус</th><th>Заявка</th><th class="r">Коробок</th><th class="r">Шт</th><th>Таймслот</th><th>Примечания</th><th></th></tr></thead><tbody>` +
     ships.map((s) => { const cl = s.actual_cluster || s.ozon_cluster_name || s.cluster_name || "—"; return `<tr class="${s.mismatch && !s.cancelled ? "mismatch" : ""} ${s.cancelled ? "dim" : ""}"><td><b>${esc(s.name)}</b></td><td class="small">${esc(cl)}${s.mismatch ? ' <span class="err-text">не тот кластер!</span>' : ""}</td><td>${tag(SST, s.status)}</td><td>${esc(s.order_number || s.order_id || "—")}</td><td class="r">${s.boxes.length}</td><td class="r">${fmt(units(s))}</td><td class="small">${s.slot ? esc(humanSlot(s.slot)) : "—"}</td>
-      <td>${s.error ? `<div class="err-text">${esc(s.error)}</div>` : ""}${(s.warn || []).map((w) => `<div class="warn-text">${esc(w)}</div>`).join("")}</td>
+      <td>${typeof s.verified === "number" ? `<div class="good small">✓ состав подтверждён Озоном</div>` : ""}${s.error ? `<div class="err-text">${esc(s.error)}</div>` : ""}${(s.warn || []).map((w) => `<div class="warn-text">${esc(w)}</div>`).join("")}</td>
       <td class="r">${!busy && !b.multi && s.order_id && !s.cancelled ? `<button class="btn danger sm" data-cancel="${esc(s.cluster_id)}">Отменить</button>` : ""}</td></tr>`; }).join("") + `</tbody></table></div>${b.synced_at ? `<div class="muted small" style="margin-top:8px">Сверено с Озоном ${esc(b.synced_at)}</div>` : ""}</div>`;
 
   const groups = b.groups || [];

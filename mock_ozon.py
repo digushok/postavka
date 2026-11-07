@@ -254,6 +254,30 @@ class MockOzon:
             return {"status": "IN_PROGRESS"}
         return {"status": op["status"], "result": op["result"]}
 
+    def m_v2_cargoes_get(self, b):
+        out = []
+        for req in b.get("supplies") or []:
+            sup = self.supplies[int(req["supply_id"])]
+            ids = {int(x) for x in req.get("cargo_ids") or []} or set(sup["cargoes"])
+            out.append({"supply_id": int(req["supply_id"]), "cargoes": [
+                {"cargo_id": cid, "bundle_id": f"bnd-{cid}", "type": "BOX", "content_type": "MONO"}
+                for cid in sup["cargoes"] if cid in ids]})
+        return {"supplies": out}
+
+    def m_v1_supply_order_bundle(self, b):
+        items = []
+        for bid in b.get("bundle_ids") or []:
+            cid = int(str(bid).split("-")[1])
+            for sid, sup in self.supplies.items():
+                if cid in sup["cargoes"]:
+                    it = sup["cargoes"][cid]["value"]["items"][0]
+                    sku = next((i["sku"] for i in sup["items"] if "ART-" + str(i["sku"])[-4:] == it["offer_id"]), 0)
+                    qty = it["quantity"]
+                    if os.environ.get("MOCK_BAD_CARGO") and cid % 7 == 0:
+                        qty += 1                     # «Озон записал не то количество» — для проверки защиты
+                    items.append({"sku": sku, "offer_id": it["offer_id"], "quantity": qty, "name": "демо"})
+        return {"items": items, "total_count": len(items), "has_next": False}
+
     def m_v1_cargoes_label_create(self, b):
         sid = int(b["supply_id"])
         sup = self.supplies[sid]
@@ -262,7 +286,10 @@ class MockOzon:
             cg = sup["cargoes"][c["cargo_id"]]
             it = cg["value"]["items"][0]
             first = f"OZON  CARGO {c['cargo_id']}" if not os.environ.get("MOCK_LABEL_NO_ID") else "OZON  CARGO (barcode)"
-            pages.append([first, f"Supply {sid}", f"{it.get('offer_id')} x {it['quantity']}", "DEMO LABEL"])
+            offer = it.get("offer_id")
+            if os.environ.get("MOCK_ALIEN_LABEL") and c["cargo_id"] % 5 == 0:
+                offer = "ART-0064" if offer != "ART-0064" else "ART-0032"     # «Озон напечатал чужой товар»
+            pages.append([first, f"Supply {sid}", f"{offer} x {it['quantity']}", "DEMO LABEL"])
         guid = f"g{self._id()}"
         self.files[guid] = _pdf(pages)
         op = f"lop-{self._id()}"

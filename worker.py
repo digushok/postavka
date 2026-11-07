@@ -463,6 +463,9 @@ class Run:
 
         if st == "label":
             s.setdefault("labels", {})
+            if not s.get("verified"):
+                if not self.verify_contents(s, it):
+                    return                    # Озон ещё считает составы — проверим на следующем шаге
             groups = self.groups_of(s)
             if all(g in s["labels"] and os.path.exists(os.path.join(self.dir, s["labels"][g])) for g in groups):
                 it["stage"] = "pass"
@@ -531,6 +534,53 @@ class Run:
             self.set(s, "done")
             it["stage"] = "done"
 
+    def verify_contents(self, s, it):
+        """Проверка №1: спрашиваем у Озона, что записано в каждом грузоместе, и сверяем с расчётом.
+
+        Возвращает True, когда проверка закончена (или недоступна), False — если Озон ещё не готов.
+        Если хоть в одном грузоместе не то — ошибка, этикетки для поставки не выпускаются."""
+        names = {p["sku"]: (p.get("short") or p.get("name") or p["sku"]) for p in self.batch["products"]}
+        ids = {str(b["key"]): int(s["cargo_ids"][str(b["key"])]) for b in s["boxes"]}
+        try:
+            r = self.api.post("/v2/cargoes/get", {"supplies": [
+                {"supply_id": int(s["supply_id"]), "cargo_ids": [str(i) for i in ids.values()]}]})
+            bundles = {}
+            for sup in r.get("supplies") or []:
+                for c in sup.get("cargoes") or []:
+                    if c.get("cargo_id") and c.get("bundle_id"):
+                        bundles[int(c["cargo_id"])] = c["bundle_id"]
+            if len(bundles) < len(ids):
+                if time.time() - it.setdefault("verify_t", time.time()) < 300:
+                    return False
+                raise OzonError("Озон не показывает состав части грузомест")
+            bad = []
+            for b in s["boxes"]:
+                cid = ids[str(b["key"])]
+                rb = self.api.post("/v1/supply-order/bundle", {"bundle_ids": [bundles[cid]], "limit": 100})
+                items = [x for x in rb.get("items") or [] if int(x.get("quantity") or 0) > 0]
+                if not items:
+                    if time.time() - it.setdefault("verify_t", time.time()) < 300:
+                        return False
+                    raise OzonError("Озон не показывает состав части грузомест")
+                got = {str(x.get("sku")): int(x.get("quantity") or 0) for x in items}
+                if got != {str(b["sku"]): int(b["qty"])}:
+                    have = ", ".join(f"{names.get(k, 'SKU ' + k)} × {v}" for k, v in got.items())
+                    bad.append(f"грузоместо {cid}: ожидалось {names.get(b['sku'], b['sku'])} × {b['qty']}, у Озона {have}")
+            if bad:
+                raise OzonError("Состав грузомест у Озона не совпадает с расчётом — этикетки для этой поставки "
+                                "не выпущены, проверьте поставку в кабинете: " + "; ".join(bad))
+            s["verified"] = len(ids)
+            self.log(f"Состав грузомест подтверждён Озоном: {len(ids)} из {len(ids)}", s)
+        except OzonError as e:
+            if "не совпадает" in str(e):
+                raise
+            # сама проверка недоступна (метод/права) — не блокируем, этикетки всё равно раскладываются по номерам
+            s["verified"] = "unavailable"
+            s.setdefault("warn", []).append(f"Сверить состав грузомест с Озоном не удалось: {e}")
+            self.log(f"Сверить состав грузомест с Озоном не удалось: {e}", s, "warn")
+        self.save()
+        return True
+
     def _label_ready(self, op, too_long):
         """PDF этикеток по операции или None, если Озон ещё готовит."""
         g = self.api.post("/v1/cargoes-label/get", {"operation_id": op})
@@ -590,6 +640,26 @@ class Run:
                           f"переход на запрос по составам")
             return False
         key_to_id = {str(b["key"]): int(s["cargo_ids"][str(b["key"])]) for b in s["boxes"]}
+        # проверка №3: если на этикетке напечатан товар (артикул или SKU) — он должен быть свой
+        prods = {p["sku"]: {t for t in (str(p["sku"]), str(p.get("offer_id") or "")) if len(t) >= 4}
+                 for p in self.batch["products"]}
+
+        def has(text, token):
+            return re.search(rf"(?<![0-9A-Za-z]){re.escape(token)}(?![0-9A-Za-z])", text) is not None
+
+        texts = []
+        for page in pages:
+            try:
+                texts.append(page.extract_text() or "")
+            except Exception:
+                texts.append("")
+        for b in s["boxes"]:
+            t = texts[by_cargo[key_to_id[str(b["key"])]]]
+            own = any(has(t, x) for x in prods.get(b["sku"], ()))
+            alien = [sku for sku, toks in prods.items() if sku != b["sku"] and any(has(t, x) for x in toks)]
+            if alien and not own:
+                raise OzonError(f"На этикетке грузоместа {key_to_id[str(b['key'])]} напечатан другой товар "
+                                f"(SKU {', '.join(alien)}) — этикетки для этой поставки не выпущены")
         for gid, boxes in self.groups_of(s).items():
             w = PdfWriter()
             for b in boxes:
