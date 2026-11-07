@@ -101,16 +101,16 @@
           </div>
         </div>
         <div class="tile">
-          <div class="tile-h">Таймслот — один для всех</div>
+          <div class="tile-h">Таймслот</div>
           <div class="seg" id="tsSeg">
             <label><input type="radio" name="tsmode" value="manual"><span>Выберу сам</span></label>
             <label><input type="radio" name="tsmode" value="auto"><span>Автоматически</span></label>
           </div>
-          <div id="tsManualHint" class="muted small">После создания черновиков покажем свободные слоты — выберете один.</div>
+          <div id="tsManualHint" class="muted small">После создания черновиков покажем свободные слоты — выберете один для всех городов. У кого его нет, возьмём ближайший.</div>
           <div id="tsAuto">
             <div class="row tsrange"><span>с</span><input type="date" id="tsD1"><span>по</span><input type="date" id="tsD2"></div>
             <div class="row tsrange"><span>время</span><input type="time" id="tsT1"><span>—</span><input type="time" id="tsT2"></div>
-            <div class="muted small">Нет общего слота в диапазоне — возьмём ближайший.</div>
+            <div class="muted small">Каждому городу — самый ранний свободный слот в диапазоне. Если в диапазоне свободных нет — ближайший к нему.</div>
           </div>
         </div>
         <div class="tile">

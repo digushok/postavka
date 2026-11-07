@@ -96,6 +96,35 @@ def nearest_to(slots, target):
     return min(slots, key=lambda s: (cost(s), parse(s[0])))
 
 
+def choose_for_city(slots, pref, coverage=None):
+    """Таймслот для одного города в автоматическом режиме.
+
+    1. Есть слоты внутри диапазона — самый ранний день; в этот день — слот, доступный
+       наибольшему числу городов (машины едут в одно время), затем более раннее время.
+    2. В диапазоне ничего — ближайший к диапазону (при равенстве — доступный большему числу городов).
+    coverage: {key(slot): сколько городов могут его взять}
+    """
+    if not slots:
+        return None
+    cov = coverage or {}
+    inside = [s for s in slots if distance(s, pref) == 0]
+    if inside:
+        return min(inside, key=lambda s: (parse(s[0]).date(), -cov.get(key(s), 0), parse(s[0])))
+    return min(slots, key=lambda s: (distance(s, pref), -cov.get(key(s), 0), parse(s[0])))
+
+
+def summary(slots):
+    """Сводка по слотам партии: «09.11 вс 10:00–11:00 — 5 · 11.11 вт 10:00–11:00 — 4»."""
+    cnt = {}
+    for s in slots:
+        if s:
+            cnt[key(s)] = (s, cnt.get(key(s), (s, 0))[1] + 1)
+    items = sorted(cnt.values(), key=lambda x: parse(x[0][0]))
+    if len(items) == 1:
+        return human(items[0][0])
+    return " · ".join(f"{human(s)} — {n}" for s, n in items)
+
+
 def human(slot):
     a, b = parse(slot[0]), parse(slot[1])
     days = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]

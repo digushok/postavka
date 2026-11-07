@@ -222,14 +222,24 @@ class Run:
         slot = S.nearest_to(available, want)
         if not slot:
             raise OzonError("Нет доступных таймслотов")
-        msg = f"Таймслот {S.human(want)} уже недоступен — взят ближайший {S.human(slot)}"
+        msg = f"Таймслот {S.human(want)} недоступен — взят ближайший {S.human(slot)}"
         if who:
             who.setdefault("warn", []).append(msg)
         self.log(msg, who if who and "name" in who else None, "warn")
-        if not self.batch.get("slot_locked"):
-            self.batch["chosen_slot"] = slot
-            self.batch["chosen_slot_human"] = S.human(slot)
-            self.log(f"Остальные поставки партии тоже ставлю на {S.human(slot)}", lvl="warn")
+        return slot
+
+    def auto_slot(self, s):
+        """Автоматический режим, отдельные заявки: каждому городу — свой лучший слот в диапазоне."""
+        pref = self.batch["slot_pref"]
+        lists = [x.get("slots") or [] for x in self.active() if x.get("slots")]
+        cov = {S.key(sl): n for sl, n in S.slot_counts(lists)}
+        slot = S.choose_for_city(s["slots"], pref, cov)
+        if not slot:
+            raise OzonError("Нет доступных таймслотов")
+        if S.distance(slot, pref) > 0:
+            msg = f"В диапазоне свободных слотов нет — взят ближайший {S.human(slot)}"
+            s.setdefault("warn", []).append(msg)
+            self.log(msg, s, "warn")
         return slot
 
     def create_supply(self, s):
@@ -240,12 +250,14 @@ class Run:
         elif time.time() - s.get("slots_at", 0) > 90:
             s["slots"] = self.fetch_slots(s["draft_id"], "CROSSDOCK", [s])
             s["slots_at"] = time.time()
-        slot = self.take_slot(s["slots"], s)
+        auto = self.batch.get("mode") == "auto"
+        slot = self.auto_slot(s) if auto else self.take_slot(s["slots"], s)
         self.set(s, "supply")
         order_id = self.submit_supply(s["draft_id"], "CROSSDOCK", [s], slot)
         s["order_id"] = order_id
         s["slot"] = slot
-        self.batch["slot_locked"] = True
+        if auto:
+            self.batch["chosen_slot_human"] = S.summary([x.get("slot") for x in self.active()])
         self.save()
         self.log(f"Заявка создана, id {order_id}, таймслот {S.human(slot)}", s)
 
@@ -543,21 +555,21 @@ class Run:
         b["common_slots"] = common
         if b["mode"] == "auto":
             pref = b["slot_pref"]
-            counts = S.slot_counts(slot_lists)
-            best = max((n for _, n in counts), default=0)
-            cand = common or [sl for sl, n in counts if n == best]
-            chosen = S.pick(cand, pref)
-            if chosen and not common and len(slot_lists) > 1:
-                self.log(f"Общего таймслота для всех {len(slot_lists)} поставок нет — беру слот, "
-                         f"доступный наибольшему числу ({best})", lvl="warn")
-            if not chosen:
+            cov = {S.key(sl): n for sl, n in S.slot_counts(slot_lists)}
+            plan = [S.choose_for_city(l, pref, cov) for l in slot_lists]
+            if not any(plan):
                 self.fail("У Озона нет свободных таймслотов")
                 return False
-            b["chosen_slot"] = chosen
-            b["chosen_slot_human"] = S.human(chosen)
-            inside = S.distance(chosen, pref) == 0
-            self.log(f"Выбран таймслот {S.human(chosen)}" + ("" if inside else " (в диапазоне свободных нет — ближайший)"),
-                     lvl="info" if inside else "warn")
+            # для общей заявки слот один; для отдельных — запоминаем самый частый для отображения
+            b["chosen_slot"] = max((p for p in plan if p), key=lambda p: (sum(1 for q in plan if q == p), -S.parse(p[0]).timestamp()))
+            b["chosen_slot_human"] = S.summary(plan)
+            inside = sum(1 for p in plan if p and S.distance(p, pref) == 0)
+            if len(slot_lists) == 1:
+                self.log(f"Выбран таймслот {S.human(plan[0])}" + ("" if inside else " (в диапазоне свободных нет — ближайший)"),
+                         lvl="info" if inside else "warn")
+            else:
+                self.log(f"Таймслоты по городам: в диапазоне — {inside} из {len(plan)}, остальным ближайшие. {S.summary(plan)}",
+                         lvl="info" if inside == len(plan) else "warn")
             self.save()
             return True
         b["phase"] = "await_slot"

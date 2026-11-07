@@ -20,5 +20,30 @@ class T(unittest.TestCase):
         self.assertEqual(S.common_slots([a, b]), [sl(9, 12)])
         self.assertEqual(S.nearest_to(b, sl(9, 9)), sl(9, 12))
 
+
+
+class TestPerCity(unittest.TestCase):
+    pref = {"date_from": "2026-11-09", "date_to": "2026-11-11", "time_from": "00:00", "time_to": "23:59"}
+
+    def test_example_from_user(self):
+        # нужен 9–11 число: у части городов есть 9-е, у части 11-е, у остальных только 15-е
+        a = [sl(9, 10), sl(15, 10)]
+        b = [sl(11, 10), sl(15, 10)]
+        c = [sl(15, 10), sl(17, 10)]
+        cov = {S.key(s): n for s, n in S.slot_counts([a, b, c])}
+        self.assertEqual(S.choose_for_city(a, self.pref, cov), sl(9, 10))
+        self.assertEqual(S.choose_for_city(b, self.pref, cov), sl(11, 10))
+        self.assertEqual(S.choose_for_city(c, self.pref, cov), sl(15, 10))
+
+    def test_earliest_day_first_then_most_shared_time(self):
+        a = [sl(9, 9), sl(9, 12), sl(10, 9)]
+        others = [[sl(9, 12)], [sl(9, 12)]]
+        cov = {S.key(s): n for s, n in S.slot_counts([a] + others)}
+        self.assertEqual(S.choose_for_city(a, self.pref, cov), sl(9, 12))
+
+    def test_summary(self):
+        self.assertIn("— 2", S.summary([sl(9, 10), sl(9, 10), sl(11, 10)]))
+
+
 if __name__ == "__main__":
     unittest.main()
