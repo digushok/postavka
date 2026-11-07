@@ -11,6 +11,9 @@ on:
 permissions:
   contents: write
 
+env:
+  PYTHONUTF8: "1"
+
 jobs:
   build:
     runs-on: windows-latest
@@ -54,7 +57,7 @@ jobs:
           Copy-Item dist/OzonSupplies.exe "release/Поставки Ozon/Поставки Ozon.exe"
           Copy-Item docs/Инструкция.txt "release/Поставки Ozon/"
           Compress-Archive -Path "release/Поставки Ozon" -DestinationPath "release/Postavki-Ozon-windows-v$env:VERSION.zip" -Force
-          python tools/release_notes.py | Out-File -Encoding utf8 release/notes.md
+          python tools/release_notes.py --out release/notes.md
 
       - uses: actions/upload-artifact@v4
         with:
