@@ -1,0 +1,12 @@
+# данные пользователя — никогда не попадают в репозиторий (там API-ключи)
+data/
+*.json.tmp
+# сборка
+build/
+dist/
+*.spec
+release/
+# Python
+__pycache__/
+*.pyc
+.venv/

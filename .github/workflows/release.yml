@@ -1,0 +1,56 @@
+name: Сборка .exe
+
+on:
+  push:
+    tags: ["v*"]          # git tag v1.4.1 && git push --tags → выпуск в Releases
+  workflow_dispatch:      # ручной запуск: архив появится в артефактах сборки
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Зависимости
+        run: python -m pip install -r requirements-build.txt
+
+      - name: Метка совпадает с version.py
+        if: startsWith(github.ref, 'refs/tags/')
+        run: python tools/release_notes.py --check-tag ${{ github.ref_name }}
+
+      - name: Тесты
+        run: python -m unittest discover -s tests -v
+
+      - name: Сборка
+        run: pyinstaller --noconfirm --onefile --noconsole --name OzonSupplies --icon icon.ico --add-data "static;static" --hidden-import mock_ozon app.py
+
+      - name: Архив
+        shell: pwsh
+        run: |
+          $v = python -c "from version import VERSION; print(VERSION)"
+          New-Item -ItemType Directory -Force -Path "release/Поставки Ozon" | Out-Null
+          Copy-Item dist/OzonSupplies.exe "release/Поставки Ozon/Поставки Ozon.exe"
+          Copy-Item docs/Инструкция.txt "release/Поставки Ozon/"
+          Compress-Archive -Path "release/Поставки Ozon" -DestinationPath "release/Postavki-Ozon-windows-v$v.zip" -Force
+          python tools/release_notes.py | Out-File -Encoding utf8 release/notes.md
+          "VERSION=$v" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Postavki-Ozon-windows-v${{ env.VERSION }}
+          path: release/*.zip
+
+      - name: Выпуск
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Поставки Ozon ${{ env.VERSION }}
+          body_path: release/notes.md
+          files: release/*.zip

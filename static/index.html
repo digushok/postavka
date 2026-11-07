@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Поставки Ozon</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="top-in">
+    <div class="brand"><img src="icon.svg" alt="" class="logo"><div><b>Поставки Ozon</b><span>FBO · кросс-докинг</span></div></div>
+    <nav class="tabs">
+      <button data-tab="new" class="on">Новая поставка</button>
+      <button data-tab="batches">Партии</button>
+      <button data-tab="settings">Настройки</button>
+    </nav>
+    <div class="shop">
+      <select id="shopSel" title="Магазин"></select>
+      <button class="icon-btn" id="quitBtn" title="Закрыть программу">⏻</button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <!-- ======================= НОВАЯ ПОСТАВКА ======================= -->
+  <section id="tab-new" class="tab">
+    <div id="demoNote" class="banner hidden"><b>Демо-режим.</b> Запросы идут в демо-Озон внутри программы — в настоящий магазин ничего не отправляется.</div>
+    <div id="keyNote" class="banner warn hidden">Чтобы начать, укажите Client-Id и API-ключ во вкладке «Настройки».</div>
+
+    <div class="card">
+      <div class="card-h"><span class="step">1</span><div><h2>Товары закупки</h2><p class="sub">SKU Ozon и сколько штук закуплено</p></div>
+        <div class="actions"><button class="btn soft" id="pasteBtn">Вставить из Excel</button><button class="btn soft" id="addProd">+ Товар</button></div>
+      </div>
+      <div id="pasteBox" class="paste hidden">
+        <textarea id="pasteText" rows="5" placeholder="Скопируйте из Excel два столбца — SKU и количество. Каждый товар с новой строки."></textarea>
+        <div class="row"><button class="btn primary" id="pasteApply">Добавить</button><button class="btn ghost" id="pasteCancel">Отмена</button></div>
+      </div>
+      <table class="grid" id="prodTable">
+        <thead><tr><th style="width:130px">SKU Ozon</th><th>Товар</th><th style="width:150px">Коротко<span class="hint" title="Как товар называется в таблице и в файлах этикеток">?</span></th><th class="r" style="width:110px">В коробке, шт<span class="hint" title="Сколько штук этого товара в одном грузоместе. Пусто — весь товар города в одну коробку.">?</span></th><th style="width:80px" class="c">Кратно<span class="hint" title="Распределять по городам целыми коробками (остаток штук — в город для остатка)">?</span></th><th class="r" style="width:120px">Закуплено, шт</th><th style="width:36px"></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><span class="step">2</span><div><h2>Города и доли</h2><p class="sub">Какой процент закупки уходит в каждый город</p></div>
+        <div class="actions">
+          <select id="tplSel" class="pill-select" title="Шаблон городов"></select>
+          <button class="btn ghost" id="tplSave" title="Сохранить города и доли в выбранный шаблон">Сохранить</button>
+          <button class="btn ghost" id="tplSaveAs">Сохранить как…</button>
+          <button class="btn soft" id="addCity">+ Город</button>
+        </div>
+      </div>
+      <div class="split">
+        <table class="grid" id="cityTable">
+          <thead><tr><th style="width:180px">Город</th><th>Кластер Ozon</th><th class="r" style="width:90px">Доля, %</th><th style="width:36px"></th></tr></thead>
+          <tbody></tbody>
+          <tfoot><tr><td colspan="2" class="r muted">Сумма долей</td><td class="r" id="shareSum"></td><td></td></tr></tfoot>
+        </table>
+        <div class="side panel">
+          <label class="fld">Остаток при округлении
+            <select id="method">
+              <option value="remainder_city">Весь остаток в один город</option>
+              <option value="fair">Справедливо (по наибольшему остатку)</option>
+              <option value="floor">Округлить вниз (остаток не отправлять)</option>
+            </select></label>
+          <label class="fld" id="remCityWrap">Город для остатка
+            <select id="remCity"></select></label>
+          <div class="muted small" id="clusterNote"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><span class="step">3</span><div><h2>Распределение по городам</h2><p class="sub">Любую цифру можно поправить вручную</p></div>
+        <div class="actions"><span id="editedNote" class="chip warn hidden">есть ручные правки</span><button class="btn ghost" id="recalc">↺ Пересчитать по долям</button></div>
+      </div>
+      <div class="scroll"><table class="grid matrix" id="matrix"></table></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><span class="step">4</span><div><h2>Грузоместа</h2><p class="sub" id="boxTotal">Одинаковые коробки — один файл этикеток</p></div></div>
+      <div id="groupList" class="groups"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><span class="step">5</span><div><h2>Отгрузка</h2><p class="sub">Как оформить заявки, точка, таймслот и пропуск</p></div></div>
+      <div class="modes" id="modeSeg">
+        <label><input type="radio" name="multi" value="0"><span><b>Отдельно на каждый город</b><em>Своя заявка на каждый город. Слоты обычно ближе.</em></span></label>
+        <label><input type="radio" name="multi" value="1"><span><b>Одна заявка на все города</b><em>Как «отгрузить в общей точке»: один таймслот, один пропуск, один номер заявки. Слоты обычно позже.</em></span></label>
+      </div>
+      <div class="form3">
+        <div class="tile">
+          <div class="tile-h">Точка отгрузки</div>
+          <div id="dropoffChips" class="dchips"></div>
+          <button class="btn ghost sm" id="dropoffChange">Другая точка…</button>
+          <div id="dropoffSearch" class="hidden">
+            <div class="row"><input id="dropoffQ" placeholder="Название или адрес"><button class="btn soft sm" id="dropoffFind">Найти</button></div>
+            <div id="dropoffRes" class="list"></div>
+          </div>
+        </div>
+        <div class="tile">
+          <div class="tile-h">Таймслот — один для всех</div>
+          <div class="seg" id="tsSeg">
+            <label><input type="radio" name="tsmode" value="manual"><span>Выберу сам</span></label>
+            <label><input type="radio" name="tsmode" value="auto"><span>Автоматически</span></label>
+          </div>
+          <div id="tsManualHint" class="muted small">После создания черновиков покажем свободные слоты — выберете один.</div>
+          <div id="tsAuto">
+            <div class="row tsrange"><span>с</span><input type="date" id="tsD1"><span>по</span><input type="date" id="tsD2"></div>
+            <div class="row tsrange"><span>время</span><input type="time" id="tsT1"><span>—</span><input type="time" id="tsT2"></div>
+            <div class="muted small">Нет общего слота в диапазоне — возьмём ближайший.</div>
+          </div>
+        </div>
+        <div class="tile">
+          <div class="tile-h">Пропуск</div>
+          <label class="switch"><input type="checkbox" id="passOn"><span class="sw"></span>Оформить пропуск</label>
+          <div class="muted small" id="passInfo"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="actionbar">
+      <div class="actionbar-in">
+        <div id="summary" class="summary"></div>
+        <button class="btn primary lg" id="createBtn">Создать поставки →</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= ПАРТИИ ======================= -->
+  <section id="tab-batches" class="tab hidden">
+    <div id="batchList"></div>
+    <div id="batchView" class="hidden"></div>
+  </section>
+
+  <!-- ======================= НАСТРОЙКИ ======================= -->
+  <section id="tab-settings" class="tab hidden">
+    <div class="settings">
+      <div class="card">
+        <div class="card-h"><div><h2>Магазин</h2><p class="sub">Ключ берётся в кабинете Ozon: Настройки → Seller API</p></div></div>
+        <div class="form2">
+          <label class="fld">Название<input id="sName"></label>
+          <label class="fld">Client-Id<input id="sClient" autocomplete="off"></label>
+          <label class="fld">API-ключ<input id="sKey" type="password" autocomplete="new-password"></label>
+          <label class="switch self-end"><input type="checkbox" id="sDemo"><span class="sw"></span>Демо-режим</label>
+        </div>
+        <div class="row"><button class="btn primary" id="sSave">Сохранить</button><button class="btn soft" id="sCheck">Проверить подключение</button><span id="sMsg" class="muted"></span></div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><div><h2>Точки отгрузки</h2><p class="sub">Избранные точки выбираются в новой поставке одним нажатием. Основная подставляется сама.</p></div></div>
+        <div id="sDropoffs" class="shops"></div>
+        <div id="sPending"></div>
+        <div class="row"><input id="sDropQ" class="grow" placeholder="Добавить точку: название или адрес, например «Хоругвино»"><button class="btn soft" id="sDropFind">Найти</button></div>
+        <div id="sDropRes" class="list"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><div><h2>Пропуск по умолчанию</h2></div></div>
+        <div class="form2">
+          <label class="switch"><input type="checkbox" id="pOn"><span class="sw"></span>Оформлять пропуск при создании</label><span></span>
+          <label class="fld">ФИО водителя<input id="pName"></label>
+          <label class="fld">Телефон<input id="pPhone" placeholder="+79991234567"></label>
+          <label class="fld">Марка автомобиля<input id="pModel"></label>
+          <label class="fld">Госномер<input id="pNum" placeholder="А123ВС777"></label>
+        </div>
+        <div class="row"><button class="btn primary" id="pSave">Сохранить</button><span id="pMsg" class="muted"></span></div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><div><h2>Таймслот по умолчанию</h2></div></div>
+        <div class="form2">
+          <label class="fld">Способ<select id="tMode"><option value="manual">Выбирать вручную</option><option value="auto">Автоматически в диапазоне</option></select></label><span></span>
+          <div class="fld">Через сколько дней от сегодня<div class="row tight"><span>с</span><input type="number" id="tDays1" min="0" class="w70"><span>по</span><input type="number" id="tDays2" min="0" class="w70"></div></div>
+          <div class="fld">Время<div class="row tight"><span>с</span><input type="time" id="tT1"><span>до</span><input type="time" id="tT2"></div></div>
+        </div>
+        <div class="row"><button class="btn primary" id="tSave">Сохранить</button><span id="tMsg" class="muted"></span></div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><div><h2>Товары</h2><p class="sub">Запоминаются сами, когда вы вводите их в новой поставке</p></div></div>
+        <table class="grid" id="sProducts"></table>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><div><h2>О программе</h2><p class="sub" id="aboutSub"></p></div>
+          <div class="actions"><button class="btn soft" id="updCheck">Проверить обновления</button></div></div>
+        <div id="updRes"></div>
+        <details class="changes"><summary>История изменений</summary><div id="changeLog"></div></details>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><div><h2>Данные программы</h2><p class="sub">Ключи, настройки, товары и партии хранятся в постоянной папке и не пропадают при замене .exe</p></div></div>
+        <div class="dropoff big"><span class="muted" id="dataDir"></span></div>
+        <div class="row">
+          <button class="btn soft" id="dExport">Сохранить копию настроек</button>
+          <button class="btn soft" id="dImport">Загрузить из файла</button>
+          <button class="btn ghost" id="dFind">Найти старые настройки на компьютере</button>
+          <button class="btn ghost" id="dOpen">Открыть папку</button>
+          <input type="file" id="dFile" accept=".json,application/json" class="hidden">
+        </div>
+        <div id="dFound" class="list"></div>
+        <p class="muted small">Копия настроек содержит API-ключи — храните файл в надёжном месте. По нему же можно перенести программу на другой компьютер.</p>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><div><h2>Магазины на этом компьютере</h2></div>
+          <div class="actions"><button class="btn soft" id="shopNew">+ Магазин</button><button class="btn ghost" id="shopDemo">+ Демо-магазин</button></div></div>
+        <div id="sShops" class="shops"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="foot-bar"><span id="verFoot">Поставки Ozon</span><a class="link" id="verUpd" href="#" target="_blank" rel="noopener"></a></footer>
+<div id="toast" class="toast hidden"></div>
+<div id="modal" class="modal hidden"><div class="modal-box"><div id="modalBody"></div><div class="row r"><button class="btn ghost" id="modalNo">Отмена</button><button class="btn primary" id="modalYes">Да</button></div></div></div>
+<script src="app.js"></script>
+</body>
+</html>
