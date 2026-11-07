@@ -1,9 +1,12 @@
 name: Сборка .exe
 
+# Выпуск создаётся сам, когда в main меняется номер версии в version.py.
+# Метку vX.Y.Z GitHub ставит автоматически. Если выпуск с этим номером уже есть — только сборка.
 on:
   push:
-    tags: ["v*"]          # git tag v1.4.1 && git push --tags → выпуск в Releases
-  workflow_dispatch:      # ручной запуск: архив появится в артефактах сборки
+    branches: [main]
+    paths: ["version.py", ".github/workflows/release.yml"]
+  workflow_dispatch:      # ручной запуск: Actions → «Сборка .exe» → Run workflow
 
 permissions:
   contents: write
@@ -21,12 +24,25 @@ jobs:
       - name: Зависимости
         run: python -m pip install -r requirements-build.txt
 
-      - name: Метка совпадает с version.py
-        if: startsWith(github.ref, 'refs/tags/')
-        run: python tools/release_notes.py --check-tag ${{ github.ref_name }}
-
       - name: Тесты
         run: python -m unittest discover -s tests -v
+
+      - name: Версия
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = python -c "from version import VERSION; print(VERSION)"
+          "VERSION=$v" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          gh release view "v$v" --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            "RELEASE_EXISTS=1" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+            Write-Host "Выпуск v$v уже есть — только сборка"
+          } else {
+            "RELEASE_EXISTS=0" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+            Write-Host "Будет создан выпуск v$v"
+          }
+          exit 0
 
       - name: Сборка
         run: pyinstaller --noconfirm --onefile --noconsole --name OzonSupplies --icon icon.ico --add-data "static;static" --hidden-import mock_ozon app.py
@@ -34,13 +50,11 @@ jobs:
       - name: Архив
         shell: pwsh
         run: |
-          $v = python -c "from version import VERSION; print(VERSION)"
           New-Item -ItemType Directory -Force -Path "release/Поставки Ozon" | Out-Null
           Copy-Item dist/OzonSupplies.exe "release/Поставки Ozon/Поставки Ozon.exe"
           Copy-Item docs/Инструкция.txt "release/Поставки Ozon/"
-          Compress-Archive -Path "release/Поставки Ozon" -DestinationPath "release/Postavki-Ozon-windows-v$v.zip" -Force
+          Compress-Archive -Path "release/Поставки Ozon" -DestinationPath "release/Postavki-Ozon-windows-v$env:VERSION.zip" -Force
           python tools/release_notes.py | Out-File -Encoding utf8 release/notes.md
-          "VERSION=$v" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
       - uses: actions/upload-artifact@v4
         with:
@@ -48,9 +62,11 @@ jobs:
           path: release/*.zip
 
       - name: Выпуск
-        if: startsWith(github.ref, 'refs/tags/')
+        if: env.RELEASE_EXISTS == '0'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
           name: Поставки Ozon ${{ env.VERSION }}
           body_path: release/notes.md
           files: release/*.zip
