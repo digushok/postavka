@@ -96,21 +96,38 @@ def nearest_to(slots, target):
     return min(slots, key=lambda s: (cost(s), parse(s[0])))
 
 
-def choose_for_city(slots, pref, coverage=None):
-    """Таймслот для одного города в автоматическом режиме.
+def wanted(pref):
+    """Желаемый момент поставки: {date, time}. Старые партии хранили диапазон — берём его начало."""
+    d = pref.get("date") or pref.get("date_from")
+    t = pref.get("time") or pref.get("time_from") or "10:00"
+    h, m = _hm(t, "10:00")
+    return datetime.strptime(d, "%Y-%m-%d").replace(hour=h, minute=m)
 
-    1. Есть слоты внутри диапазона — самый ранний день; в этот день — слот, доступный
-       наибольшему числу городов (машины едут в одно время), затем более раннее время.
-    2. В диапазоне ничего — ближайший к диапазону (при равенстве — доступный большему числу городов).
-    coverage: {key(slot): сколько городов могут его взять}
+
+def day_shift(slot, pref):
+    """На сколько дней слот отстоит от желаемого дня (0 — тот же день)."""
+    return (parse(slot[0]).date() - wanted(pref).date()).days
+
+
+def choose_for_city(slots, pref, coverage=None):
+    """Таймслот для одного города по желаемым дню и времени.
+
+    1. Желаемый день важнее времени: берём ближайший день к желаемому (в любую сторону,
+       при равенстве — более поздний).
+    2. Внутри дня — время, ближайшее к желаемому (10:00 занято → 12:00 подойдёт).
+    3. При равенстве — слот, доступный большему числу городов.
     """
     if not slots:
         return None
     cov = coverage or {}
-    inside = [s for s in slots if distance(s, pref) == 0]
-    if inside:
-        return min(inside, key=lambda s: (parse(s[0]).date(), -cov.get(key(s), 0), parse(s[0])))
-    return min(slots, key=lambda s: (distance(s, pref), -cov.get(key(s), 0), parse(s[0])))
+    w = wanted(pref)
+
+    def cost(s):
+        st = parse(s[0])
+        days = (st.date() - w.date()).days
+        minutes = abs((st.hour * 60 + st.minute) - (w.hour * 60 + w.minute))
+        return (abs(days), 0 if days >= 0 else 1, minutes, -cov.get(key(s), 0), st)
+    return min(slots, key=cost)
 
 
 def summary(slots):

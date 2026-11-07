@@ -103,14 +103,13 @@
         <div class="tile">
           <div class="tile-h">Таймслот</div>
           <div class="seg" id="tsSeg">
-            <label><input type="radio" name="tsmode" value="manual"><span>Выберу сам</span></label>
-            <label><input type="radio" name="tsmode" value="auto"><span>Автоматически</span></label>
+            <label><input type="radio" name="tsmode" value="auto"><span>Желаемые день и время</span></label>
+            <label><input type="radio" name="tsmode" value="manual"><span>Выберу из списка</span></label>
           </div>
           <div id="tsManualHint" class="muted small">После создания черновиков покажем свободные слоты — выберете один для всех городов. У кого его нет, возьмём ближайший.</div>
           <div id="tsAuto">
-            <div class="row tsrange"><span>с</span><input type="date" id="tsD1"><span>по</span><input type="date" id="tsD2"></div>
-            <div class="row tsrange"><span>время</span><input type="time" id="tsT1"><span>—</span><input type="time" id="tsT2"></div>
-            <div class="muted small">Каждому городу — самый ранний свободный слот в диапазоне. Если в диапазоне свободных нет — ближайший к нему.</div>
+            <div class="row tsrange"><input type="date" id="tsD1"><input type="time" id="tsT1"></div>
+            <div class="muted small">Каждому городу — свободный слот в этот день, ближайший по времени. Если в этот день у города слотов нет — ближайший день.</div>
           </div>
         </div>
         <div class="tile">
@@ -172,9 +171,9 @@
       <div class="card">
         <div class="card-h"><div><h2>Таймслот по умолчанию</h2></div></div>
         <div class="form2">
-          <label class="fld">Способ<select id="tMode"><option value="manual">Выбирать вручную</option><option value="auto">Автоматически в диапазоне</option></select></label><span></span>
-          <div class="fld">Через сколько дней от сегодня<div class="row tight"><span>с</span><input type="number" id="tDays1" min="0" class="w70"><span>по</span><input type="number" id="tDays2" min="0" class="w70"></div></div>
-          <div class="fld">Время<div class="row tight"><span>с</span><input type="time" id="tT1"><span>до</span><input type="time" id="tT2"></div></div>
+          <label class="fld">Способ<select id="tMode"><option value="auto">Желаемые день и время</option><option value="manual">Выбирать из списка</option></select></label><span></span>
+          <div class="fld">Желаемый день: через сколько дней от сегодня<div class="row tight"><input type="number" id="tDays1" min="0" class="w70"><span>дн.</span></div></div>
+          <div class="fld">Желаемое время<div class="row tight"><input type="time" id="tT1"></div></div>
         </div>
         <div class="row"><button class="btn primary" id="tSave">Сохранить</button><span id="tMsg" class="muted"></span></div>
       </div>

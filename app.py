@@ -47,6 +47,11 @@ def migrate_clusters():
     d = ST._read(path, {"active": None, "profiles": []})   # сырые данные, без значений по умолчанию
     changed = False
     for p in d["profiles"]:
+        ts = p.get("timeslot") or {}
+        if "days_to" in ts or "time_to" in ts:          # 1.5.1 и раньше: диапазон → желаемые день и время
+            p["timeslot"] = {"mode": "auto", "days_from": ts.get("days_from", 2) or 2,
+                             "time_from": ts.get("time_from") or "10:00"}
+            changed = True
         if p.get("clusters_v") == 2:
             continue
         for t in p.get("templates") or []:

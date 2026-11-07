@@ -190,7 +190,7 @@ DEFAULT_SETTINGS = {
     "template": "Основной",
     "method": "remainder_city",
     "remainder_city": "largest",
-    "timeslot": {"mode": "manual", "days_from": 1, "days_to": 7, "time_from": "09:00", "time_to": "18:00"},
+    "timeslot": {"mode": "auto", "days_from": 2, "time_from": "10:00"},
 }
 
 

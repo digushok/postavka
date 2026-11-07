@@ -29,7 +29,7 @@ _save_lock = threading.Lock()
 REASONS = {
     "NOT_AVAILABLE_CLUSTERS": "Озон не принимает поставки в этот кластер через выбранную точку отгрузки",
     "CAN_NOT_CREATE_DRAFT": "Озон не смог создать черновик",
-    "TIMESLOT_NOT_AVAILABLE": "таймслот уже занят",
+    "TIMESLOT_NOT_AVAILABLE": "таймслот успели занять (Озон отдал его другому продавцу)",
     "DRAFT_DOES_NOT_EXIST": "черновик устарел",
 }
 
@@ -72,6 +72,7 @@ class Run:
         self.api = make_client(self.profile, log=self._api_log)
         self.api.stop_flag = stop
         self.failed_now = set()   # города, упавшие в этом запуске, — повторно не трогаем
+        self.pipe = []            # конвейер: поставки, у которых идут грузоместа и этикетки
 
     # --------------------------------------------------------- служебное
     def _api_log(self, s):
@@ -233,11 +234,12 @@ class Run:
         pref = self.batch["slot_pref"]
         lists = [x.get("slots") or [] for x in self.active() if x.get("slots")]
         cov = {S.key(sl): n for sl, n in S.slot_counts(lists)}
-        slot = S.choose_for_city(s["slots"], pref, cov)
+        tried = {S.key(x) for x in s.get("tried_slots") or []}
+        slot = S.choose_for_city([x for x in s["slots"] if S.key(x) not in tried], pref, cov)
         if not slot:
-            raise OzonError("Нет доступных таймслотов")
-        if S.distance(slot, pref) > 0:
-            msg = f"В диапазоне свободных слотов нет — взят ближайший {S.human(slot)}"
+            raise OzonError("Нет свободных таймслотов")
+        if S.day_shift(slot, pref) != 0:
+            msg = f"В желаемый день свободных слотов нет — взят ближайший {S.human(slot)}"
             s.setdefault("warn", []).append(msg)
             self.log(msg, s, "warn")
         return slot
@@ -251,9 +253,25 @@ class Run:
             s["slots"] = self.fetch_slots(s["draft_id"], "CROSSDOCK", [s])
             s["slots_at"] = time.time()
         auto = self.batch.get("mode") == "auto"
-        slot = self.auto_slot(s) if auto else self.take_slot(s["slots"], s)
-        self.set(s, "supply")
-        order_id = self.submit_supply(s["draft_id"], "CROSSDOCK", [s], slot)
+        s["tried_slots"] = []
+        for attempt in range(4):
+            if auto:
+                slot = self.auto_slot(s)
+            else:
+                avail = [x for x in s["slots"] if S.key(x) not in {S.key(t) for t in s["tried_slots"]}]
+                slot = self.take_slot(avail, s)
+            self.set(s, "supply")
+            try:
+                order_id = self.submit_supply(s["draft_id"], "CROSSDOCK", [s], slot)
+                break
+            except OzonError as e:
+                if "TIMESLOT_NOT_AVAILABLE" not in getattr(e, "codes", ()) or attempt == 3:
+                    raise
+                # слот забрали между проверкой и бронированием — берём следующий
+                s["tried_slots"].append(slot)
+                self.log(f"Таймслот {S.human(slot)} успели занять — беру следующий свободный", s, "warn")
+                s["slots"] = self.fetch_slots(s["draft_id"], "CROSSDOCK", [s])
+                s["slots_at"] = time.time()
         s["order_id"] = order_id
         s["slot"] = slot
         if auto:
@@ -268,13 +286,17 @@ class Run:
         r = self.api.post("/v2/draft/supply/create", body)
         errs = [e for e in (r.get("error_reasons") or []) if e not in ("UNSPECIFIED",)]
         if errs:
-            raise OzonError("Заявка не создана: " + _reasons(errs))
+            e = OzonError("Заявка не создана: " + _reasons(errs))
+            e.codes = errs
+            raise e
         st = self.api.poll("/v2/draft/supply/create/status", {"draft_id": draft_id},
                            lambda x: x.get("status") not in ("IN_PROGRESS", None, "", "UNSPECIFIED"),
                            interval=3, timeout=300)
         if st.get("status") != "SUCCESS" or not st.get("order_id"):
-            raise OzonError("Заявка не создана: " + _reasons(
-                [e for e in st.get("error_reasons") or [] if e != "UNSPECIFIED"] or [st.get("status", "")]))
+            codes = [c for c in st.get("error_reasons") or [] if c != "UNSPECIFIED"] or [st.get("status", "")]
+            e = OzonError("Заявка не создана: " + _reasons(codes))
+            e.codes = codes
+            raise e
         return st["order_id"]
 
     def fetch_order(self, order_id, ships):
@@ -311,28 +333,273 @@ class Run:
                 raise OzonError("Озон ещё не выдал номера поставок — нажмите «Продолжить» через минуту")
             self.api.sleep(4 * self.api.speed)
 
-    # --------------------------------------------------------- грузоместа и этикетки (параллельно)
-    def cargo_phase(self, ships):
-        """Грузоместа и этикетки сразу для всех поставок.
+    # --------------------------------------------------------- конвейер: грузоместа → этикетки
+    #
+    # Каждая созданная заявка сразу попадает в конвейер. Пока программа ждёт, когда Озон разрешит
+    # создать следующую заявку (не чаще 2 в минуту), конвейер двигает уже созданные поставки:
+    # номер поставки → грузоместа → один запрос этикеток на всю поставку → страницы раскладываются
+    # по файлам составов (файлы обновляются сразу, их можно печатать не дожидаясь конца).
 
-        Раньше программа ждала каждую поставку по очереди (Озон готовит этикетки 2–3 минуты),
-        и 14 городов занимали почти час. Теперь запросы уходят по всем поставкам сразу,
-        а ответы собираются одним общим циклом — общее время ≈ времени одной поставки.
-        """
-        ships = [s for s in ships if s.get("supply_id") and s["status"] != "done"
-                 and s["cluster_id"] not in self.failed_now]
-        if not ships:
+    def pipe_add(self, s):
+        if s["status"] == "done" or s["cluster_id"] in self.failed_now:
             return
-        self.cargo_all(ships)
-        ok = [s for s in ships if s["cluster_id"] not in self.failed_now]
-        self.labels_all(ok)
-        for s in ok:
-            if s["cluster_id"] in self.failed_now:
-                continue
+        self.pipe.append({"s": s, "stage": "order", "op": None, "chunks": None, "t": time.time()})
+
+    def pipe_busy(self):
+        return bool(self.pipe)
+
+    def pipe_tick(self):
+        """Один шаг по каждой поставке в конвейере. Ничего не ждёт дольше одного запроса."""
+        for it in list(self.pipe):
+            self.check_stop()
+            s = it["s"]
+            try:
+                self._pipe_step(it)
+            except OzonError as e:
+                if self.stop.is_set():
+                    raise
+                self.pipe.remove(it)
+                self.ship_error(s, e)
+            if it.get("stage") == "done" and it in self.pipe:
+                self.pipe.remove(it)
+
+    def pipe_drain(self):
+        while self.pipe:
+            self.pipe_tick()
+            if self.pipe:
+                self.api.sleep(2 * self.api.speed)
+
+    def idle_until(self, path):
+        """Вместо простого ожидания лимита Озона — двигаем конвейер."""
+        while True:
+            left = self.api.time_until(path)
+            if left <= 0 or not self.pipe:
+                return
+            t0 = time.time()
+            self.pipe_tick()
+            spent = time.time() - t0
+            if spent < 1.5 and self.api.time_until(path) > 0:
+                self.api.sleep(min(2.0, self.api.time_until(path)))
+
+    def _pipe_step(self, it):
+        s = it["s"]
+        st = it["stage"]
+        too_long = time.time() - it["t"] > 900
+
+        if st == "order":
+            if s.get("supply_id"):
+                it["stage"] = "cargo"
+                return
+            r = self.api.post("/v3/supply-order/get", {"order_ids": [int(s["order_id"])]})
+            o = (r.get("orders") or [None])[0]
+            if o:
+                s["order_number"] = o.get("order_number") or s.get("order_number")
+                for sup in o.get("supplies") or []:
+                    ml = str(sup.get("macrolocal_cluster_id") or "")
+                    single = len(o.get("supplies") or []) == 1 and not self.batch.get("multi")
+                    if sup.get("supply_id") and (ml == str(s["cluster_id"]) or (single and not ml)):
+                        s["supply_id"] = sup["supply_id"]
+                        s["storage_name"] = (sup.get("storage_warehouse") or {}).get("name")
+                    elif single and ml and ml != str(s["cluster_id"]):
+                        raise OzonError(f"Озон создал поставку в другой кластер (ID {ml}) — отмените эту заявку")
+                self.save()
+            if s.get("supply_id"):
+                it["stage"] = "cargo"
+            elif too_long:
+                raise OzonError("Озон долго не выдаёт номер поставки — нажмите «Продолжить» позже")
+            return
+
+        if st == "cargo":
+            s.setdefault("cargo_ids", {})
+            if it["chunks"] is None:
+                todo = [b for b in s["boxes"] if str(b["key"]) not in s["cargo_ids"]]
+                it["chunks"] = P.chunks(todo)
+                it["first"] = not s["cargo_ids"]
+                it["n"] = 0
+            if not it["chunks"]:
+                missing = [b for b in s["boxes"] if str(b["key"]) not in s["cargo_ids"]]
+                if missing:
+                    raise OzonError(f"Озон не вернул номера для {len(missing)} грузомест")
+                self.log(f"Грузоместа созданы: {len(s['boxes'])}", s)
+                it["stage"] = "label"
+                return
+            self.set(s, "cargo")
+            prod = {p["sku"]: p for p in self.batch["products"]}
+            part = it["chunks"].pop(0)
+            cargoes = []
+            for b in part:
+                offer = prod.get(b["sku"], {}).get("offer_id")
+                if not offer:
+                    raise OzonError(f"У SKU {b['sku']} нет артикула (offer_id) — обновите данные товара в настройках")
+                cargoes.append({"key": b["key"], "value": {"type": "BOX", "items": [
+                    {"offer_id": offer, "quantity": int(b["qty"])}]}})
+            r = self.api.post("/v1/cargoes/create", {"supply_id": int(s["supply_id"]),
+                                                     "delete_current_version": bool(it["first"] and it["n"] == 0),
+                                                     "cargoes": cargoes})
+            it["n"] += 1
+            e = r.get("errors") or {}
+            if e.get("error_reasons") or e.get("items_validation"):
+                raise OzonError(_cargo_errors(e))
+            it["op"] = r.get("operation_id")
+            it["stage"] = "cargo_wait"
+            return
+
+        if st == "cargo_wait":
+            info = self.api.post("/v2/cargoes/create/info", {"operation_id": it["op"]})
+            status = info.get("status")
+            if status in ("IN_PROGRESS", None, "", "STATUS_UNSPECIFIED"):
+                if too_long:
+                    raise OzonError("Озон долго создаёт грузоместа — нажмите «Продолжить» позже")
+                return
+            if status != "SUCCESS":
+                raise OzonError(_cargo_errors(info.get("errors") or {}) or f"Грузоместа: {status}")
+            for c in (info.get("result") or {}).get("cargoes") or []:
+                cargo_id = (c.get("value") or {}).get("cargo_id")
+                if c.get("key") and cargo_id:
+                    s["cargo_ids"][str(c["key"])] = cargo_id
+            self.save()
+            it["stage"] = "cargo"
+            return
+
+        if st == "label":
+            s.setdefault("labels", {})
+            groups = self.groups_of(s)
+            if all(g in s["labels"] and os.path.exists(os.path.join(self.dir, s["labels"][g])) for g in groups):
+                it["stage"] = "pass"
+                return
+            self.set(s, "labels")
+            if self.batch.get("labels_mode") == "per_group":
+                # надёжный способ: отдельный файл на каждый состав (номер на этикетке не читается)
+                it["gops"] = {}
+                for gid, boxes in groups.items():
+                    if gid in s["labels"] and os.path.exists(os.path.join(self.dir, s["labels"][gid])):
+                        continue
+                    ids = [int(s["cargo_ids"][str(b["key"])]) for b in boxes]
+                    r = self.api.post("/v1/cargoes-label/create",
+                                      {"supply_id": int(s["supply_id"]), "cargoes": [{"cargo_id": i} for i in ids]})
+                    if (r.get("errors") or {}).get("error_reasons"):
+                        raise OzonError("Этикетки: " + ", ".join(r["errors"]["error_reasons"]))
+                    it["gops"][gid] = r.get("operation_id")
+                it["stage"] = "label_wait_groups"
+                return
+            ids = [int(s["cargo_ids"][str(b["key"])]) for b in s["boxes"]]
+            r = self.api.post("/v1/cargoes-label/create",
+                              {"supply_id": int(s["supply_id"]), "cargoes": [{"cargo_id": i} for i in ids]})
+            if (r.get("errors") or {}).get("error_reasons"):
+                raise OzonError("Этикетки: " + ", ".join(r["errors"]["error_reasons"]))
+            it["op"] = r.get("operation_id")
+            it["ids"] = ids
+            it["stage"] = "label_wait"
+            return
+
+        if st == "label_wait_groups":
+            for gid, op in list(it["gops"].items()):
+                pdf = self._label_ready(op, too_long)
+                if pdf is None:
+                    continue
+                rel = f"raw/{s['supply_id']}_{gid}.pdf"
+                with open(os.path.join(self.dir, rel), "wb") as f:
+                    f.write(pdf)
+                s["labels"][gid] = rel
+                it["gops"].pop(gid)
+                self.save()
+            if not it["gops"]:
+                self._labels_done(s)
+                it["stage"] = "pass"
+            return
+
+        if st == "label_wait":
+            pdf = self._label_ready(it["op"], too_long)
+            if pdf is None:
+                return
+            if not self.split_labels(s, pdf, it["ids"]):
+                # номера грузомест на этикетках не читаются — раскладывать «по порядку» не рискуем
+                if self.batch.get("labels_mode") != "per_group":
+                    self.batch["labels_mode"] = "per_group"
+                    self.log("Номера грузомест на этикетках Озона не читаются — дальше запрашиваю этикетки "
+                             "отдельно по каждому составу (так надёжнее)", lvl="warn")
+                it["stage"] = "label"
+                return
+            self._labels_done(s)
+            it["stage"] = "pass"
+            return
+
+        if st == "pass":
             if not self.batch.get("multi"):
                 self.set(s, "pass")
                 self.make_pass(s["order_id"], s, s)
             self.set(s, "done")
+            it["stage"] = "done"
+
+    def _label_ready(self, op, too_long):
+        """PDF этикеток по операции или None, если Озон ещё готовит."""
+        g = self.api.post("/v1/cargoes-label/get", {"operation_id": op})
+        status = g.get("status")
+        if status in ("IN_PROGRESS", None, ""):
+            if too_long:
+                raise OzonError("Озон долго готовит этикетки — нажмите «Продолжить» позже")
+            return None
+        res = g.get("result") or {}
+        if status != "SUCCESS" or not (res.get("file_url") or res.get("file_guid")):
+            raise OzonError("Этикетки не сформированы: " + ", ".join(
+                (g.get("errors") or {}).get("error_reasons") or [status or ""]))
+        url = res.get("file_url") or f"https://api-seller.ozon.ru/v1/cargoes-label/file/{res['file_guid']}"
+        pdf = self.api.get_file(url)
+        if not pdf.startswith(b"%PDF"):
+            raise OzonError("Озон вернул не PDF-файл этикеток")
+        return pdf
+
+    def _labels_done(self, s):
+        self.log("Этикетки получены", s)
+        try:
+            self.rebuild_outputs()            # файлы составов обновляются сразу
+        except Exception:
+            self._api_log(traceback.format_exc())
+
+    @staticmethod
+    def groups_of(s):
+        out = {}
+        for b in s["boxes"]:
+            out.setdefault(f"{b['sku']}x{b['qty']}", []).append(b)
+        return out
+
+    def split_labels(self, s, pdf, ids):
+        """Раскладывает страницы общего PDF поставки по составам коробок.
+
+        Страницу узнаём по номеру грузоместа, напечатанному на этикетке. Если хоть один номер
+        не опознан — возвращаем False, и этикетки запрашиваются отдельно по составам."""
+        import io
+        from pypdf import PdfReader, PdfWriter
+        raw = os.path.join(self.dir, "raw")
+        os.makedirs(raw, exist_ok=True)
+        with open(os.path.join(raw, f"{s['supply_id']}_all.pdf"), "wb") as f:
+            f.write(pdf)
+        reader = PdfReader(io.BytesIO(pdf))
+        pages = list(reader.pages)
+        by_cargo = {}
+        for i, page in enumerate(pages):
+            try:
+                text = re.sub(r"\s+", "", page.extract_text() or "")
+            except Exception:
+                text = ""
+            hits = [c for c in ids if str(c) in text]
+            if len(hits) == 1 and hits[0] not in by_cargo:
+                by_cargo[hits[0]] = i
+        if len(by_cargo) != len(ids):
+            self._api_log(f"{s['name']}: на этикетках опознано {len(by_cargo)} из {len(ids)} грузомест — "
+                          f"переход на запрос по составам")
+            return False
+        key_to_id = {str(b["key"]): int(s["cargo_ids"][str(b["key"])]) for b in s["boxes"]}
+        for gid, boxes in self.groups_of(s).items():
+            w = PdfWriter()
+            for b in boxes:
+                w.add_page(pages[by_cargo[key_to_id[str(b["key"])]]])
+            rel = f"raw/{s['supply_id']}_{gid}.pdf"
+            with open(os.path.join(self.dir, rel), "wb") as f:
+                w.write(f)
+            s["labels"][gid] = rel
+        self.save()
+        return True
 
     def ship_error(self, s, e):
         if self.stop.is_set():
@@ -341,142 +608,13 @@ class Run:
         self.set(s, "error", str(e))
         self.log(str(e), s, "error")
 
-    def cargo_all(self, ships):
-        prod = {p["sku"]: p for p in self.batch["products"]}
-        plan = {}
+    def cargo_phase(self, ships):
+        """Догоняет все поставки, у которых уже есть заявка (при «Продолжить» и после создания)."""
         for s in ships:
-            s.setdefault("cargo_ids", {})
-            todo = [b for b in s["boxes"] if str(b["key"]) not in s["cargo_ids"]]
-            if todo:
-                plan[s["cluster_id"]] = {"s": s, "chunks": P.chunks(todo), "first": not s["cargo_ids"]}
-                self.set(s, "cargo")
-        rnd = 0
-        while plan:
-            self.check_stop()
-            ops = {}
-            for cid, p in list(plan.items()):
-                s = p["s"]
-                part = p["chunks"].pop(0)
-                try:
-                    cargoes = []
-                    for b in part:
-                        offer = prod.get(b["sku"], {}).get("offer_id")
-                        if not offer:
-                            raise OzonError(f"У SKU {b['sku']} нет артикула (offer_id) — обновите данные товара в настройках")
-                        cargoes.append({"key": b["key"], "value": {"type": "BOX", "items": [
-                            {"offer_id": offer, "quantity": int(b["qty"])}]}})
-                    r = self.api.post("/v1/cargoes/create", {
-                        "supply_id": int(s["supply_id"]), "delete_current_version": bool(p["first"] and rnd == 0),
-                        "cargoes": cargoes})
-                    e = r.get("errors") or {}
-                    if e.get("error_reasons") or e.get("items_validation"):
-                        raise OzonError(_cargo_errors(e))
-                    ops[cid] = r.get("operation_id")
-                except OzonError as e:
-                    plan.pop(cid)
-                    self.ship_error(s, e)
-            t0 = time.time()
-            while ops:
-                self.check_stop()
-                for cid, op in list(ops.items()):
-                    s = plan[cid]["s"]
-                    try:
-                        info = self.api.post("/v2/cargoes/create/info", {"operation_id": op})
-                        st = info.get("status")
-                        if st in ("IN_PROGRESS", None, "", "STATUS_UNSPECIFIED"):
-                            continue
-                        ops.pop(cid)
-                        if st != "SUCCESS":
-                            raise OzonError(_cargo_errors(info.get("errors") or {}) or f"Грузоместа: {st}")
-                        for c in (info.get("result") or {}).get("cargoes") or []:
-                            cargo_id = (c.get("value") or {}).get("cargo_id")
-                            if c.get("key") and cargo_id:
-                                s["cargo_ids"][str(c["key"])] = cargo_id
-                        self.save()
-                        if not plan[cid]["chunks"]:
-                            plan.pop(cid)
-                            missing = [b for b in s["boxes"] if str(b["key"]) not in s["cargo_ids"]]
-                            if missing:
-                                raise OzonError(f"Озон не вернул номера для {len(missing)} грузомест")
-                            self.log(f"Грузоместа созданы: {len(s['boxes'])}", s)
-                    except OzonError as e:
-                        ops.pop(cid, None)
-                        plan.pop(cid, None)
-                        self.ship_error(s, e)
-                if ops:
-                    if time.time() - t0 > 600:
-                        for cid in list(ops):
-                            self.ship_error(plan.pop(cid)["s"], OzonError(
-                                "Озон долго создаёт грузоместа — нажмите «Продолжить» позже"))
-                        break
-                    self.api.sleep(3 * self.api.speed)
-            rnd += 1
-
-    def labels_all(self, ships):
-        """Этикетки: по одному запросу на каждый состав коробки в каждой поставке, все сразу."""
-        os.makedirs(os.path.join(self.dir, "raw"), exist_ok=True)
-        ops = []           # (поставка, состав, operation_id)
-        for s in ships:
-            self.check_stop()
-            s.setdefault("labels", {})
-            by_group = {}
-            for b in s["boxes"]:
-                by_group.setdefault(f"{b['sku']}x{b['qty']}", []).append(s["cargo_ids"][str(b["key"])])
-            todo = {g: ids for g, ids in by_group.items()
-                    if not (g in s["labels"] and os.path.exists(os.path.join(self.dir, s["labels"][g])))}
-            if not todo:
-                continue
-            self.set(s, "labels")
-            try:
-                for gid, ids in todo.items():
-                    r = self.api.post("/v1/cargoes-label/create",
-                                      {"supply_id": int(s["supply_id"]), "cargoes": [{"cargo_id": int(i)} for i in ids]})
-                    if (r.get("errors") or {}).get("error_reasons"):
-                        raise OzonError("Этикетки: " + ", ".join(r["errors"]["error_reasons"]))
-                    ops.append([s, gid, r.get("operation_id")])
-            except OzonError as e:
-                ops = [o for o in ops if o[0] is not s]
-                self.ship_error(s, e)
-        if ops:
-            self.log(f"Запрошены этикетки: {len(ops)} файлов по {len({id(o[0]) for o in ops})} поставкам — Озон готовит их параллельно")
-        t0 = time.time()
-        while ops:
-            self.check_stop()
-            for o in list(ops):
-                s, gid, op = o
-                if s["cluster_id"] in self.failed_now:
-                    ops.remove(o)
-                    continue
-                try:
-                    g = self.api.post("/v1/cargoes-label/get", {"operation_id": op})
-                    st = g.get("status")
-                    if st in ("IN_PROGRESS", None, ""):
-                        continue
-                    ops.remove(o)
-                    res = g.get("result") or {}
-                    if st != "SUCCESS" or not (res.get("file_url") or res.get("file_guid")):
-                        raise OzonError("Этикетки не сформированы: " + ", ".join(
-                            (g.get("errors") or {}).get("error_reasons") or [st or ""]))
-                    url = res.get("file_url") or f"https://api-seller.ozon.ru/v1/cargoes-label/file/{res['file_guid']}"
-                    pdf = self.api.get_file(url)
-                    if not pdf.startswith(b"%PDF"):
-                        raise OzonError("Озон вернул не PDF-файл этикеток")
-                    rel = f"raw/{s['supply_id']}_{gid}.pdf"
-                    with open(os.path.join(self.dir, rel), "wb") as f:
-                        f.write(pdf)
-                    s["labels"][gid] = rel
-                    self.save()
-                    if not any(x[0] is s for x in ops):
-                        self.log("Этикетки получены", s)
-                except OzonError as e:
-                    ops = [x for x in ops if x[0] is not s]
-                    self.ship_error(s, e)
-            if ops:
-                if time.time() - t0 > 900:
-                    for s in {id(o[0]): o[0] for o in ops}.values():
-                        self.ship_error(s, OzonError("Озон долго готовит этикетки — нажмите «Продолжить» позже"))
-                    break
-                self.api.sleep(3 * self.api.speed)
+            if s.get("order_id") and s["status"] != "done" and s["cluster_id"] not in self.failed_now \
+                    and not any(it["s"] is s for it in self.pipe):
+                self.pipe_add(s)
+        self.pipe_drain()
 
     # --------------------------------------------------------- пропуск
     def make_pass(self, order_id, holder, log_ship=None):
@@ -534,15 +672,18 @@ class Run:
         # 2. Заявки — сначала все подряд, пока живы черновики
         b["phase"] = "supplies"
         self.save()
+        for s in ships:                      # уже созданные (при «Продолжить») — сразу в конвейер
+            if s.get("order_id"):
+                self.pipe_add(s)
         for s in ships:
             if s.get("order_id") or s["cluster_id"] in self.failed_now or s["status"] == "done":
                 continue
+            self.idle_until("/v2/draft/supply/create")     # пока ждём лимит — двигаем конвейер
             self.safe(s, self.create_supply)
-        for s in ships:
-            if s.get("order_id") and not s.get("supply_id") and s["cluster_id"] not in self.failed_now:
-                self.safe(s, lambda x: self.fetch_order(x["order_id"], [x]))
+            if s.get("order_id"):
+                self.pipe_add(s)
 
-        # 3. Грузоместа, этикетки, пропуска
+        # 3. Догоняем грузоместа, этикетки, пропуска
         b["phase"] = "cargo"
         self.save()
         self.cargo_phase(ships)
@@ -563,13 +704,13 @@ class Run:
             # для общей заявки слот один; для отдельных — запоминаем самый частый для отображения
             b["chosen_slot"] = max((p for p in plan if p), key=lambda p: (sum(1 for q in plan if q == p), -S.parse(p[0]).timestamp()))
             b["chosen_slot_human"] = S.summary(plan)
-            inside = sum(1 for p in plan if p and S.distance(p, pref) == 0)
+            inside = sum(1 for p in plan if p and S.day_shift(p, pref) == 0)
             if len(slot_lists) == 1:
-                self.log(f"Выбран таймслот {S.human(plan[0])}" + ("" if inside else " (в диапазоне свободных нет — ближайший)"),
+                self.log(f"Выбран таймслот {S.human(plan[0])}" + ("" if inside else " (в желаемый день свободных нет — ближайший)"),
                          lvl="info" if inside else "warn")
             else:
-                self.log(f"Таймслоты по городам: в диапазоне — {inside} из {len(plan)}, остальным ближайшие. {S.summary(plan)}",
-                         lvl="info" if inside == len(plan) else "warn")
+                self.log(f"Таймслоты по городам: в желаемый день — {inside} из {len(plan)}, остальным ближайший день. "
+                         f"{S.summary(plan)}", lvl="info" if inside == len(plan) else "warn")
             self.save()
             return True
         b["phase"] = "await_slot"
@@ -619,15 +760,26 @@ class Run:
             b["phase"] = "supplies"
             self.save()
             live = self.multi_ships()
-            slot = self.take_slot(M["slots"], M)
+            tried = []
             for s in live:
                 self.set(s, "supply")
-            try:
-                M["order_id"] = self.submit_supply(M["draft_id"], "MULTI_CLUSTER", live, slot)
-            except OzonError as e:
-                for s in live:
-                    self.set(s, "error", str(e))
-                return self.fail(str(e))
+            for attempt in range(4):
+                avail = [x for x in M["slots"] if S.key(x) not in {S.key(t) for t in tried}]
+                slot = (S.choose_for_city(avail, b["slot_pref"]) if b.get("mode") == "auto" else self.take_slot(avail, M))
+                if not slot:
+                    return self.fail("Нет свободных таймслотов")
+                try:
+                    M["order_id"] = self.submit_supply(M["draft_id"], "MULTI_CLUSTER", live, slot)
+                    break
+                except OzonError as e:
+                    if "TIMESLOT_NOT_AVAILABLE" in getattr(e, "codes", ()) and attempt < 3:
+                        tried.append(slot)
+                        self.log(f"Таймслот {S.human(slot)} успели занять — беру следующий свободный", lvl="warn")
+                        M["slots"] = self.fetch_slots(M["draft_id"], "MULTI_CLUSTER", live)
+                        continue
+                    for s in live:
+                        self.set(s, "error", str(e))
+                    return self.fail(str(e))
             M["slot"] = slot
             b["slot_locked"] = True
             for s in live:

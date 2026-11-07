@@ -23,23 +23,25 @@ class T(unittest.TestCase):
 
 
 class TestPerCity(unittest.TestCase):
-    pref = {"date_from": "2026-11-09", "date_to": "2026-11-11", "time_from": "00:00", "time_to": "23:59"}
+    pref = {"date": "2026-11-09", "time": "10:00"}      # хочу 9-е, 10:00
 
-    def test_example_from_user(self):
-        # нужен 9–11 число: у части городов есть 9-е, у части 11-е, у остальных только 15-е
-        a = [sl(9, 10), sl(15, 10)]
-        b = [sl(11, 10), sl(15, 10)]
-        c = [sl(15, 10), sl(17, 10)]
-        cov = {S.key(s): n for s, n in S.slot_counts([a, b, c])}
-        self.assertEqual(S.choose_for_city(a, self.pref, cov), sl(9, 10))
-        self.assertEqual(S.choose_for_city(b, self.pref, cov), sl(11, 10))
-        self.assertEqual(S.choose_for_city(c, self.pref, cov), sl(15, 10))
+    def test_same_day_other_hour(self):
+        # 10:00 уже занято, на 9-е есть 12:00 — берём его, время не так важно, как день
+        self.assertEqual(S.choose_for_city([sl(9, 12), sl(10, 10)], self.pref), sl(9, 12))
+        self.assertEqual(S.choose_for_city([sl(9, 10), sl(9, 12)], self.pref), sl(9, 10))
 
-    def test_earliest_day_first_then_most_shared_time(self):
-        a = [sl(9, 9), sl(9, 12), sl(10, 9)]
-        others = [[sl(9, 12)], [sl(9, 12)]]
-        cov = {S.key(s): n for s, n in S.slot_counts([a] + others)}
-        self.assertEqual(S.choose_for_city(a, self.pref, cov), sl(9, 12))
+    def test_nearest_day_any_direction(self):
+        self.assertEqual(S.choose_for_city([sl(8, 10), sl(11, 10)], self.pref), sl(8, 10))   # 8-е ближе 11-го
+        self.assertEqual(S.choose_for_city([sl(8, 10), sl(10, 10)], self.pref), sl(10, 10))  # поровну — позже
+
+    def test_most_shared_on_equal(self):
+        a = [sl(9, 7), sl(9, 13)]                       # обе на 3 часа от 10:00
+        cov = {S.key(sl(9, 13)): 5, S.key(sl(9, 7)): 1}
+        self.assertEqual(S.choose_for_city(a, self.pref, cov), sl(9, 13))
+
+    def test_old_batches_with_range(self):
+        old = {"date_from": "2026-11-09", "date_to": "2026-11-11", "time_from": "10:00", "time_to": "18:00"}
+        self.assertEqual(S.choose_for_city([sl(9, 12), sl(11, 10)], old), sl(9, 12))
 
     def test_summary(self):
         self.assertIn("— 2", S.summary([sl(9, 10), sl(9, 10), sl(11, 10)]))

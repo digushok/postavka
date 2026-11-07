@@ -16,7 +16,8 @@ MIN_INTERVAL = {
     "/v1/draft/multi-cluster/create": 31,
     "/v2/draft/supply/create": 31,
 }
-DEFAULT_INTERVAL = 0.35
+DEFAULT_INTERVAL = 0.6        # один и тот же метод — не чаще ~1,5 раза в секунду
+GLOBAL_INTERVAL = 0.22        # все запросы вместе — не чаще ~4–5 в секунду (лимит Озона на продавца)
 
 
 class OzonError(Exception):
@@ -39,11 +40,18 @@ class OzonClient:
         self.stop_flag = None     # threading.Event — прервать ожидание
 
     # ---------------------------------------------------------------
+    def time_until(self, path):
+        """Сколько секунд осталось до момента, когда метод можно вызвать без ожидания."""
+        interval = MIN_INTERVAL.get(path, DEFAULT_INTERVAL) * self.speed
+        with self._lock:
+            return max(0.0, self._last.get(path, 0) + interval - time.time())
+
     def _wait_turn(self, path):
         interval = MIN_INTERVAL.get(path, DEFAULT_INTERVAL) * self.speed
         with self._lock:
             now = time.time()
-            ready = self._last.get(path, 0) + interval
+            ready = max(self._last.get(path, 0) + interval, self._last.get("*", 0) + GLOBAL_INTERVAL * self.speed)
+            self._last["*"] = max(now, ready)
             delay = max(0.0, ready - now)
             self._last[path] = now + delay
         if delay:
@@ -100,6 +108,13 @@ class OzonClient:
             self._log(f"POST {path} {json.dumps(body, ensure_ascii=False)[:2000]}\n  ← {status} "
                       f"{json.dumps(js, ensure_ascii=False)[:3000]}")
             if status == 429:
+                per_second = "per second" in str(js.get("message", "")).lower() if isinstance(js, dict) else False
+                if per_second:
+                    # секундный лимит: хватает короткой паузы (раньше ждали 20 с — отсюда медленные этикетки)
+                    if attempt >= 20:
+                        raise OzonError("Озон: превышен лимит запросов в секунду (429)", 429, path, js)
+                    self.sleep(min(0.8 * attempt, 4) * self.speed)
+                    continue
                 if attempt >= retries:
                     raise OzonError("Озон: превышен лимит запросов (429)", 429, path, js)
                 self.sleep((20 if attempt < 3 else 60) * self.speed)

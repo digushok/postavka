@@ -125,8 +125,8 @@ function newDraft() {
     cities: tpl ? JSON.parse(JSON.stringify(tpl.cities)) : [],
     method: P.method || "remainder_city", remCity: P.remainder_city || "largest",
     matrix: null, edited: {},
-    tsmode: ts.mode || "manual",
-    ts: { d1: addDays(ts.days_from ?? 1), d2: addDays(ts.days_to ?? 7), t1: ts.time_from || "09:00", t2: ts.time_to || "18:00" },
+    tsmode: ts.mode || "auto",
+    ts: { d1: addDays(ts.days_from ?? 2), t1: ts.time_from || "10:00" },
     passOn: !!(P.pass && P.pass.enabled), dropoff: P.dropoff || null, multi: false, cv: 2,
   };
 }
@@ -364,7 +364,8 @@ function renderShipping() {
   $$("#dropoffChips .dchip").forEach((el) => (el.onclick = () => { D.dropoff = favs[+el.dataset.i]; saveDraft(); renderShipping(); }));
   $$("input[name=tsmode]").forEach((r) => (r.checked = r.value === D.tsmode));
   $$("input[name=multi]").forEach((r) => (r.checked = r.value === (D.multi ? "1" : "0")));
-  $("#tsD1").value = D.ts.d1; $("#tsD2").value = D.ts.d2; $("#tsT1").value = D.ts.t1; $("#tsT2").value = D.ts.t2;
+  if (!D.ts.d1 || D.ts.d1 < ymd(new Date())) D.ts.d1 = addDays((APP.profile.timeslot || {}).days_from ?? 2);
+  $("#tsD1").value = D.ts.d1; $("#tsT1").value = D.ts.t1 || "10:00";
   $("#tsAuto").classList.toggle("hidden", D.tsmode !== "auto");
   $("#tsManualHint").classList.toggle("hidden", D.tsmode === "auto");
   const ps = APP.profile.pass || {};
@@ -374,7 +375,7 @@ function renderShipping() {
 }
 $$("input[name=tsmode]").forEach((r) => (r.onchange = () => { D.tsmode = r.value; saveDraft(); renderShipping(); renderSummary(); }));
 $$("input[name=multi]").forEach((r) => (r.onchange = () => { D.multi = r.value === "1"; saveDraft(); renderShipping(); renderSummary(); }));
-[["#tsD1", "d1"], ["#tsD2", "d2"], ["#tsT1", "t1"], ["#tsT2", "t2"]].forEach(([s, k]) => ($(s).onchange = (e) => { D.ts[k] = e.target.value; saveDraft(); }));
+[["#tsD1", "d1"], ["#tsT1", "t1"]].forEach(([s, k]) => ($(s).onchange = (e) => { D.ts[k] = e.target.value; saveDraft(); }));
 $("#passOn").onchange = (e) => { D.passOn = e.target.checked; saveDraft(); };
 $("#dropoffChange").onclick = () => { $("#dropoffSearch").classList.toggle("hidden"); $("#dropoffQ").focus(); };
 async function searchDropoff(q, resEl, onPick) {
@@ -406,7 +407,7 @@ $("#createBtn").onclick = async () => {
   const used = D.cities.filter((c) => Object.values((D.matrix || {})[cityKey(c)] || {}).some((v) => v > 0));
   if (used.some((c) => !c.cluster_id)) errs.push("не у всех городов выбран кластер Ozon");
   if (!D.dropoff) errs.push("не выбрана точка отгрузки");
-  if (D.tsmode === "auto" && (!D.ts.d1 || !D.ts.d2)) errs.push("не указан диапазон дат таймслота");
+  if (D.tsmode === "auto" && !D.ts.d1) errs.push("не указан желаемый день поставки");
   const keys = used.map(cityKey); if (new Set(keys).size !== keys.length) errs.push("один кластер выбран для двух городов");
   if (errs.length) return toast("Нельзя создать: " + errs.join("; "), true);
 
@@ -416,7 +417,7 @@ $("#createBtn").onclick = async () => {
   if (D.multi && used.length > 20) return toast("Одной заявкой Озон принимает не больше 20 городов", true);
   const ok = await confirmBox(`<h3>${D.multi ? `Создать одну заявку на ${used.length} городов?` : `Создать ${used.length} заявок?`}</h3>
     <p>${fmt(boxes)} коробок через «${esc(D.dropoff.name)}».<br>
-    Таймслот: ${D.tsmode === "auto" ? `автоматически, ${esc(D.ts.d1)} — ${esc(D.ts.d2)}, ${esc(D.ts.t1)}–${esc(D.ts.t2)}` : "выберете из доступных после создания черновиков"}.<br>
+    Таймслот: ${D.tsmode === "auto" ? `желаемо ${esc(dmy(D.ts.d1))} в ${esc(D.ts.t1 || "10:00")} — каждому городу ближайший свободный` : "выберете из доступных после создания черновиков"}.<br>
     ${D.passOn ? "Пропуск будет оформлен." : "Без пропуска."}</p>
     ${diff.length ? `<p class="warn-text">Распределено не столько, сколько закуплено: ${diff.map((p) => esc(prodLabel(p))).join(", ")}.</p>` : ""}
     ${APP.profile.demo ? '<p class="muted">Демо-режим: в настоящий Озон ничего не отправится.</p>' : ""}`, "Создать");
@@ -427,7 +428,7 @@ $("#createBtn").onclick = async () => {
       products: prods.map((p) => ({ sku: p.sku, qty: p.qty, name: p.name, short: prodLabel(p), box_size: p.box_size || null })),
       cities: used.map((c) => ({ cluster_id: String(c.cluster_id), name: c.name, cluster_name: c.cluster_name })),
       matrix: Object.fromEntries(used.map((c) => [String(c.cluster_id), D.matrix[cityKey(c)]])),
-      mode: D.tsmode, slot_pref: { date_from: D.ts.d1, date_to: D.ts.d2, time_from: D.ts.t1, time_to: D.ts.t2 },
+      mode: D.tsmode, slot_pref: { date: D.ts.d1, time: D.ts.t1 || "10:00" },
       dropoff: D.dropoff, pass: Object.assign({}, APP.profile.pass || {}, { enabled: D.passOn }), multi: !!D.multi,
       source: JSON.parse(JSON.stringify(D)),
     };
@@ -480,7 +481,8 @@ function renderBatch(b) {
   const units = (s) => s.boxes.reduce((a, x) => a + x.qty, 0);
   const done = active.filter((s) => s.status === "done").length;
   const pct = active.length ? Math.round(done / active.length * 100) : 0;
-  const slotText = b.chosen_slot_human || (b.mode === "auto" ? `авто: ${b.slot_pref?.date_from} — ${b.slot_pref?.date_to}, ${b.slot_pref?.time_from}–${b.slot_pref?.time_to}` : "выбор вручную");
+  const pref = b.slot_pref || {};
+  const slotText = b.chosen_slot_human || (b.mode === "auto" ? `желаемо ${dmy(pref.date || pref.date_from)} ${pref.time || pref.time_from || ""}` : "выбор из списка");
   let h = `<a class="back" id="backList">← Все партии</a>
     <div class="card"><div class="bhead"><h2>Партия от ${esc(b.created)}</h2>${busy && b.phase !== "cancelling" ? '<span class="chip run">выполняется</span>' : tag(PHASE, b.phase)}${b.demo ? '<span class="chip plain">демо</span>' : ""}
     <div class="actions">
@@ -640,8 +642,7 @@ function renderSettings() {
   $("#pOn").checked = !!ps.enabled; $("#pName").value = ps.driver_name || ""; $("#pPhone").value = ps.driver_phone || "";
   $("#pModel").value = ps.vehicle_model || ""; $("#pNum").value = ps.vehicle_number || "";
   const ts = P.timeslot || {};
-  $("#tMode").value = ts.mode || "manual"; $("#tDays1").value = ts.days_from ?? 1; $("#tDays2").value = ts.days_to ?? 7;
-  $("#tT1").value = ts.time_from || "09:00"; $("#tT2").value = ts.time_to || "18:00";
+  $("#tMode").value = ts.mode || "auto"; $("#tDays1").value = ts.days_from ?? 2; $("#tT1").value = ts.time_from || "10:00";
   const prods = Object.entries(P.products || {});
   $("#sProducts").innerHTML = prods.length ? `<thead><tr><th>SKU</th><th>Артикул</th><th>Название</th><th>Коротко</th><th class="r">В коробке</th><th class="c">Кратно</th><th></th></tr></thead><tbody>` +
     prods.map(([sku, p]) => `<tr data-sku="${esc(sku)}"><td>${esc(sku)}</td><td class="small">${esc(p.offer_id || "—")}</td><td class="pname">${esc(p.name || "")}</td><td><input class="sp-short" value="${esc(p.short || "")}"></td><td><input class="sp-box" type="number" min="0" value="${p.box_size || ""}" style="width:80px"></td><td class="c"><input type="checkbox" class="sp-mult" ${p.multiple ? "checked" : ""}></td><td><button class="x">×</button></td></tr>`).join("") + "</tbody>"
@@ -703,7 +704,7 @@ $("#pSave").onclick = async () => {
   $("#pMsg").textContent = "Сохранено"; if (D) { D.passOn = APP.profile.pass.enabled; saveDraft(); renderShipping(); }
 };
 $("#tSave").onclick = async () => {
-  await saveProfile({ timeslot: { mode: $("#tMode").value, days_from: num($("#tDays1").value), days_to: num($("#tDays2").value), time_from: $("#tT1").value, time_to: $("#tT2").value } });
+  await saveProfile({ timeslot: { mode: $("#tMode").value, days_from: num($("#tDays1").value), time_from: $("#tT1").value } });
   $("#tMsg").textContent = "Сохранено";
 };
 $("#sProducts").addEventListener("change", async (e) => {
@@ -785,6 +786,9 @@ $("#quitBtn").onclick = async () => {
 async function init() {
   await loadState();
   D = lsGet(draftKey()) || newDraft();
+  if (D.ts && ("d2" in D.ts || "t2" in D.ts)) {        // старая форма с диапазоном
+    D.ts = { d1: D.ts.d1, t1: D.ts.t1 || "10:00" }; D.tsmode = "auto"; saveDraft();
+  }
   if (D.cv !== 2) {
     for (const c of D.cities) { c.match = c.match || c.cluster_name || c.name; c.cluster_id = null; c.cluster_name = null; }
     D.matrix = null; D.edited = {}; D.remCity = "largest"; D.cv = 2; saveDraft();

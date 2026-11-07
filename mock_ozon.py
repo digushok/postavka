@@ -2,6 +2,7 @@
 
 Ничего не отправляет в настоящий Озон. Включается в настройках магазина («Демо-режим»).
 """
+import os
 import random
 import threading
 import time
@@ -91,6 +92,12 @@ class MockOzon:
     def handle(self, path, body):
         with self.lock:
             self.calls.append(path)
+            # как у настоящего Озона: не больше ~5 запросов в секунду (в демо секунда сжата в SPEED раз)
+            now = time.time()
+            self.recent = [t for t in getattr(self, "recent", []) if now - t < 1.0 * SPEED] + [now]
+            if len(self.recent) > 5:
+                self.rate_limited = getattr(self, "rate_limited", 0) + 1
+                return 429, {"code": 8, "message": "You have reached request rate limit per second"}
             fn = getattr(self, "m_" + path.strip("/").replace("/", "_").replace("-", "_"), None)
             if not fn:
                 return 404, {"code": 5, "message": f"демо: метод {path} не реализован"}
@@ -193,6 +200,10 @@ class MockOzon:
             return {"error_reasons": ["DRAFT_DOES_NOT_EXIST"]}
         if len(b["selected_cluster_warehouses"]) != len(d["clusters"]):
             return {"error_reasons": ["INVALID_CLUSTERS_COUNT"]}
+        # каждый третий черновик: выбранный слот «успели занять» с первой попытки
+        if b["draft_id"] % 3 == 0 and not d.get("slot_taken_once"):
+            d["slot_taken_once"] = True
+            return {"draft_id": b["draft_id"], "error_reasons": ["TIMESLOT_NOT_AVAILABLE"]}
         oid = self._id()
         sids = []
         for c in d["clusters"]:
@@ -250,8 +261,8 @@ class MockOzon:
         for c in b.get("cargoes") or []:
             cg = sup["cargoes"][c["cargo_id"]]
             it = cg["value"]["items"][0]
-            pages.append([f"OZON  CARGO {c['cargo_id']}", f"Supply {sid}", f"{it.get('offer_id')} x {it['quantity']}",
-                          "DEMO LABEL"])
+            first = f"OZON  CARGO {c['cargo_id']}" if not os.environ.get("MOCK_LABEL_NO_ID") else "OZON  CARGO (barcode)"
+            pages.append([first, f"Supply {sid}", f"{it.get('offer_id')} x {it['quantity']}", "DEMO LABEL"])
         guid = f"g{self._id()}"
         self.files[guid] = _pdf(pages)
         op = f"lop-{self._id()}"
