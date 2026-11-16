@@ -487,7 +487,8 @@ class Run:
                 missing = [b for b in s["boxes"] if str(b["key"]) not in s["cargo_ids"]]
                 if missing:
                     raise OzonError(f"Озон не вернул номера для {len(missing)} грузомест")
-                self.log(f"Грузоместа созданы: {len(s['boxes'])}", s)
+                if it.get("n"):
+                    self.log(f"Грузоместа созданы: {len(s['boxes'])}", s)
                 it["stage"] = "label"
                 return
             self.set(s, "cargo")
@@ -538,19 +539,21 @@ class Run:
                 it["stage"] = "pass"
                 return
             self.set(s, "labels")
-            if self.batch.get("labels_mode") == "per_group":
-                # надёжный способ: отдельный файл на каждый состав (номер на этикетке не читается)
-                it["gops"] = {}
-                for gid, boxes in groups.items():
-                    if gid in s["labels"] and os.path.exists(os.path.join(self.dir, s["labels"][gid])):
+            if s.get("labels_per_cargo") or self.batch.get("labels_mode") in ("per_group", "per_cargo"):
+                # самый надёжный способ: по одному запросу на каждое грузоместо
+                it["cops"] = {}
+                s.setdefault("cargo_pdf", {})
+                for b in s["boxes"]:
+                    key = str(b["key"])
+                    if key in s["cargo_pdf"] and os.path.exists(os.path.join(self.dir, s["cargo_pdf"][key])):
                         continue
-                    ids = [int(s["cargo_ids"][str(b["key"])]) for b in boxes]
+                    cid = int(s["cargo_ids"][key])
                     r = self.api.post("/v1/cargoes-label/create",
-                                      {"supply_id": int(s["supply_id"]), "cargoes": [{"cargo_id": i} for i in ids]})
+                                      {"supply_id": int(s["supply_id"]), "cargoes": [{"cargo_id": cid}]})
                     if (r.get("errors") or {}).get("error_reasons"):
                         raise OzonError("Этикетки: " + ", ".join(r["errors"]["error_reasons"]))
-                    it["gops"][gid] = r.get("operation_id")
-                it["stage"] = "label_wait_groups"
+                    it["cops"][key] = r.get("operation_id")
+                it["stage"] = "label_wait_cargo"
                 return
             ids = [int(s["cargo_ids"][str(b["key"])]) for b in s["boxes"]]
             r = self.api.post("/v1/cargoes-label/create",
@@ -562,7 +565,26 @@ class Run:
             it["stage"] = "label_wait"
             return
 
+        if st == "label_wait_cargo":
+            for key, op in list(it["cops"].items()):
+                pdf = self._label_ready(op, too_long)
+                if pdf is None:
+                    continue
+                cid = int(s["cargo_ids"][key])
+                rel = self.single_label(s, key, cid, pdf)
+                s["cargo_pdf"][key] = rel
+                it["cops"].pop(key)
+                self.save()
+            if not it["cops"]:
+                self.assemble_from_cargo(s)
+                self._labels_done(s)
+                it["stage"] = "pass"
+            return
+
         if st == "label_wait_groups":
+            if "gops" not in it:
+                it["stage"] = "label"
+                return
             for gid, op in list(it["gops"].items()):
                 pdf = self._label_ready(op, too_long)
                 if pdf is None:
@@ -583,12 +605,7 @@ class Run:
             if pdf is None:
                 return
             if not self.split_labels(s, pdf, it["ids"]):
-                # номера грузомест на этикетках не читаются — раскладывать «по порядку» не рискуем
-                if self.batch.get("labels_mode") != "per_group":
-                    self.batch["labels_mode"] = "per_group"
-                    self.log("Номера грузомест на этикетках Озона не читаются — дальше запрашиваю этикетки "
-                             "отдельно по каждому составу (так надёжнее)", lvl="warn")
-                it["stage"] = "label"
+                it["stage"] = "label"           # по одному грузоместу (labels_per_cargo)
                 return
             self._labels_done(s)
             it["stage"] = "pass"
@@ -666,6 +683,43 @@ class Run:
             raise OzonError("Озон вернул не PDF-файл этикеток")
         return pdf
 
+    def single_label(self, s, key, cid, pdf):
+        """Файл этикетки одного грузоместа. В нём должна быть этикетка именно этого грузоместа."""
+        import io
+        from pypdf import PdfReader, PdfWriter
+        pages = list(PdfReader(io.BytesIO(pdf)).pages)
+        all_ids = [int(x) for x in s["cargo_ids"].values()]
+        own = [p for p in pages if L.cargo_ids_on_page(p, all_ids) == [cid]]
+        alien = [p for p in pages if any(c != cid for c in L.cargo_ids_on_page(p, all_ids))]
+        if alien:
+            raise OzonError(f"Озон прислал для грузоместа {cid} этикетку другого грузоместа — нажмите «Продолжить»")
+        if own:
+            chosen = own[0]
+        elif pages and len({L.page_hash(p) for p in pages}) == 1:
+            chosen = pages[0]               # номер не читается, но все страницы одинаковые
+        else:
+            raise OzonError(f"Не удалось опознать этикетку грузоместа {cid} ({len(pages)} стр.)")
+        w = PdfWriter()
+        w.add_page(chosen)
+        os.makedirs(os.path.join(self.dir, "raw"), exist_ok=True)
+        rel = f"raw/{s['supply_id']}_c{cid}.pdf"
+        with open(os.path.join(self.dir, rel), "wb") as f:
+            w.write(f)
+        return rel
+
+    def assemble_from_cargo(self, s):
+        """Файлы составов поставки из этикеток отдельных грузомест (по одной странице на коробку)."""
+        from pypdf import PdfReader, PdfWriter
+        for gid, boxes in self.groups_of(s).items():
+            w = PdfWriter()
+            for b in boxes:
+                w.add_page(PdfReader(os.path.join(self.dir, s["cargo_pdf"][str(b["key"])])).pages[0])
+            rel = f"raw/{s['supply_id']}_{gid}.pdf"
+            with open(os.path.join(self.dir, rel), "wb") as f:
+                w.write(f)
+            s["labels"][gid] = rel
+        self.save()
+
     def _labels_done(self, s):
         self.log("Этикетки получены", s)
         try:
@@ -693,18 +747,27 @@ class Run:
             f.write(pdf)
         reader = PdfReader(io.BytesIO(pdf))
         pages = list(reader.pages)
-        by_cargo = {}
+        by_cargo, problems = {}, []
+        if len(set(ids)) != len(ids):
+            problems.append("у двух коробок один номер грузоместа")
         for i, page in enumerate(pages):
-            try:
-                text = re.sub(r"\s+", "", page.extract_text() or "")
-            except Exception:
-                text = ""
-            hits = [c for c in ids if str(c) in text]
-            if len(hits) == 1 and hits[0] not in by_cargo:
-                by_cargo[hits[0]] = i
-        if len(by_cargo) != len(ids):
-            self._api_log(f"{s['name']}: на этикетках опознано {len(by_cargo)} из {len(ids)} грузомест — "
-                          f"переход на запрос по составам")
+            hits = L.cargo_ids_on_page(page, ids)
+            if len(hits) > 1:
+                problems.append(f"на странице {i + 1} несколько номеров: {', '.join(map(str, hits))}")
+            elif len(hits) == 1:
+                c = hits[0]
+                if c in by_cargo and L.page_hash(pages[by_cargo[c]]) != L.page_hash(page):
+                    problems.append(f"грузоместо {c} — на двух разных страницах")
+                by_cargo.setdefault(c, i)
+        missing = [c for c in ids if c not in by_cargo]
+        if missing:
+            problems.append(f"нет этикеток для {len(missing)} грузомест")
+        if problems:
+            # раскладывать «на глаз» не рискуем — запросим этикетки по одному грузоместу
+            s["labels_per_cargo"] = True
+            self._api_log(f"{s['name']}: раскладка общего PDF не прошла проверку ({'; '.join(problems)}) — "
+                          f"запрашиваю этикетки по одному грузоместу")
+            self.log("Этикетки поставки не прошли проверку — перезапрашиваю по одной на грузоместо", s, "warn")
             return False
         key_to_id = {str(b["key"]): int(s["cargo_ids"][str(b["key"])]) for b in s["boxes"]}
         # проверка №3: если на этикетке напечатан товар (артикул или SKU) — он должен быть свой
@@ -869,6 +932,14 @@ class Run:
     def finish(self):
         b = self.batch
         self.rebuild_outputs()
+        try:
+            chk = L.verify_outputs(b, self.dir)
+            b["labels_check"] = chk
+            self.log(("Проверка этикеток: " if chk["ok"] else "Проверка этикеток не пройдена: ") + chk["summary"],
+                     lvl="info" if chk["ok"] else "error")
+        except Exception as e:
+            self._api_log(traceback.format_exc())
+            b["labels_check"] = {"ok": False, "summary": f"проверить не удалось: {e}", "problems": []}
         bad = [s for s in self.active() if s["status"] != "done"]
         b["phase"] = "done" if not bad else "partial"
         self.log("Готово" if not bad else f"Готово с ошибками: {len(bad)} поставок требуют внимания",

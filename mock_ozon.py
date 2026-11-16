@@ -292,6 +292,8 @@ class MockOzon:
             if os.environ.get("MOCK_ALIEN_LABEL") and c["cargo_id"] % 5 == 0:
                 offer = "ART-0064" if offer != "ART-0064" else "ART-0032"     # «Озон напечатал чужой товар»
             pages.append([first, f"Supply {sid}", f"{offer} x {it['quantity']}", "DEMO LABEL"])
+        if os.environ.get("MOCK_DUP_LABEL") and len(pages) > 2:
+            pages[2] = list(pages[1])          # «Озон продублировал этикетку»: одна дважды, другой нет
         guid = f"g{self._id()}"
         self.files[guid] = _pdf(pages)
         op = f"lop-{self._id()}"

@@ -15,6 +15,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import labels as L
 import planner as P
 import tls
 import storage as ST
@@ -548,6 +549,51 @@ def api_batch_replace(b):
     return {"started": True}
 
 
+def api_batch_check_labels(b):
+    """Пересобрать файлы этикеток и проверить: каждая этикетка ровно один раз, в своём файле."""
+    pid = ST.get_profile()["id"]
+    if W.is_running(b["id"]):
+        raise OzonError("Дождитесь окончания создания поставок")
+    r = W.Run(pid, b["id"], threading.Event())
+    try:
+        r.rebuild_outputs()
+        chk = L.verify_outputs(r.batch, r.dir)
+        r.batch["labels_check"] = chk
+        r.log(("Проверка этикеток: " if chk["ok"] else "Проверка этикеток не пройдена: ") + chk["summary"],
+              lvl="info" if chk["ok"] else "error")
+    finally:
+        r._apilog.close()
+    return {"check": chk}
+
+
+def api_batch_relabel(b):
+    """Заново получить этикетки — по одной на каждое грузоместо (для поставок с проблемой или всех)."""
+    pid = ST.get_profile()["id"]
+    if W.is_running(b["id"]):
+        raise OzonError("Дождитесь окончания создания поставок")
+    bt = ST.load_batch(pid, b["id"])
+    keys = set(b.get("keys") or [])
+    n = 0
+    for s in bt["shipments"]:
+        if s.get("cancelled") or not s.get("supply_id") or not s.get("cargo_ids"):
+            continue
+        if keys and W.skey(s) not in keys:
+            continue
+        s["labels"], s["cargo_pdf"] = {}, {}
+        s["labels_per_cargo"] = True
+        s["status"] = "labels"
+        n += 1
+    if not n:
+        raise OzonError("Нет поставок, для которых можно перезапросить этикетки")
+    bt["labels_check"] = None
+    bt["phase"] = "partial"
+    bt.setdefault("log", []).append({"t": time.strftime("%H:%M:%S"), "city": "",
+                                     "msg": f"Перезапрашиваю этикетки по одной на грузоместо: поставок {n}", "lvl": "info"})
+    ST.save_batch(pid, bt)
+    W.start(pid, b["id"])
+    return {"started": n}
+
+
 def api_batch_ack(b):
     """Пользователь увидел итог отмены — больше окно не показываем."""
     pid = ST.get_profile()["id"]
@@ -619,7 +665,8 @@ ROUTES = {
     "/api/batch": api_batch, "/api/batch/slot": api_batch_slot, "/api/batch/resume": api_batch_resume,
     "/api/batch/stop": api_batch_stop, "/api/batch/cancel": api_batch_cancel,
     "/api/batch/rebuild": api_batch_rebuild,
-    "/api/batch/ack": api_batch_ack, "/api/batch/replace": api_batch_replace, "/api/batch/delete": api_batch_delete,
+    "/api/batch/ack": api_batch_ack, "/api/batch/check_labels": api_batch_check_labels,
+    "/api/batch/relabel": api_batch_relabel, "/api/batch/replace": api_batch_replace, "/api/batch/delete": api_batch_delete,
     "/api/export": api_export, "/api/import": api_import,
     "/api/legacy/find": api_legacy_find, "/api/legacy/import": api_legacy_import, "/api/batch/sync": api_batch_sync, "/api/open": api_open_folder,
 }

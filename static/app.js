@@ -666,7 +666,11 @@ function renderBatch(b) {
 
   const groups = b.groups || [];
   const files = b.files;
-  h += `<div class="card"><div class="card-h"><div><h2>Этикетки</h2><p class="sub">${files ? "Один файл — одинаковые коробки. Печатайте и клейте на любую коробку этого состава." : "Появятся, когда поставки будут созданы"}</p></div><div class="actions">${files?.all ? `<a class="btn soft" target="_blank" href="${fileUrl(b, files.all)}">Все этикетки</a>` : ""}${files?.packing ? `<a class="btn soft" target="_blank" href="${fileUrl(b, files.packing)}">Лист сборки</a>` : ""}${files ? '<button class="btn ghost" id="bLabelsFolder">Папка</button>' : ""}</div></div>`;
+  h += `<div class="card"><div class="card-h"><div><h2>Этикетки</h2><p class="sub">${files ? "Один файл — одинаковые коробки. Печатайте и клейте на любую коробку этого состава." : "Появятся, когда поставки будут созданы"}</p></div><div class="actions">${files?.all ? `<a class="btn soft" target="_blank" href="${fileUrl(b, files.all)}">Все этикетки</a>` : ""}${files?.packing ? `<a class="btn soft" target="_blank" href="${fileUrl(b, files.packing)}">Лист сборки</a>` : ""}${files && !busy ? '<button class="btn ghost" id="bCheckLabels">Проверить этикетки</button>' : ""}${files ? '<button class="btn ghost" id="bLabelsFolder">Папка</button>' : ""}</div></div>`;
+  const chk = b.labels_check;
+  if (chk && files) h += `<div class="banner ${chk.ok ? "" : "err"}" style="margin:0 0 12px">${chk.ok ? "✓ " : ""}<b>Проверка этикеток:</b> ${esc(chk.summary)}${chk.at ? ` <span class="muted small">(${esc(chk.at)})</span>` : ""}
+      ${!chk.ok && (chk.problems || []).length ? `<ul style="margin:8px 0 0">${chk.problems.slice(0, 12).map((p) => `<li>${esc(p)}</li>`).join("")}</ul>` : ""}
+      ${!chk.ok && !busy ? `<div class="row"><button class="btn danger sm" id="bRelabel">Перезапросить этикетки</button><span class="muted small">По одной на каждое грузоместо — так ошибка исключена. Старые файлы этикеток не печатайте.</span></div>` : ""}</div>`;
   h += `<div class="files-grid">` + groups.map((g, i) => {
     const f = (files?.groups || []).find((x) => x.id === g.id);
     const inner = `<div class="pdf">PDF</div><div><div class="fn">${esc(g.name)} × ${fmt(g.qty)} шт</div><div class="fm">${g.total} кор · ${g.cities.map((c) => esc(c.name) + (c.count > 1 ? ` ×${c.count}` : "")).join(", ")}${f?.missing ? `<br><span class="warn-text">не готово для ${f.missing} пост.</span>` : ""}</div></div><div class="num">${String(i + 1).padStart(2, "0")}</div>`;
@@ -712,6 +716,19 @@ function renderBatch(b) {
     showBatch(b.id);
   });
   $("#bAgain") && ($("#bAgain").onclick = () => recreate(b));
+  $("#bCheckLabels") && ($("#bCheckLabels").onclick = async () => {
+    $("#bCheckLabels").disabled = true; $("#bCheckLabels").textContent = "Проверяю…";
+    try { const r = await api("/api/batch/check_labels", { id: b.id }); toast(r.check.ok ? "Этикетки в порядке" : "Найдены проблемы с этикетками", !r.check.ok); }
+    catch (e) { toast(e.message, true); }
+    showBatch(b.id);
+  });
+  $("#bRelabel") && ($("#bRelabel").onclick = async () => {
+    const keys = (b.labels_check || {}).bad_ships || [];
+    const ok = await confirmBox(`<h3>Перезапросить этикетки?</h3><p>${keys.length ? `Для поставок с проблемой (${keys.length})` : "Для всех поставок партии"} этикетки будут получены заново — по одной на каждое грузоместо. Файлы этикеток обновятся, распечатанные раньше лучше не использовать.</p>`, "Перезапросить");
+    if (!ok) return;
+    try { await api("/api/batch/relabel", { id: b.id, keys }); } catch (e) { toast(e.message, true); }
+    showBatch(b.id);
+  });
   $("#bDelete") && ($("#bDelete").onclick = async () => {
     if (!(await confirmBox(`<h3>Удалить партию из истории?</h3><p>Партия и её файлы этикеток будут удалены с компьютера. В Озоне ничего не изменится.</p>`, "Удалить"))) return;
     try { await api("/api/batch/delete", { id: b.id }); toast("Партия удалена"); closeBatch(); loadBatches(); }

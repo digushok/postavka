@@ -117,3 +117,98 @@ td,th{{border:1px solid #bbb;padding:6px 8px;text-align:left;vertical-align:top}
 {''.join(city_rows)}</table></html>"""
     with open(path, "w", encoding="utf-8") as f:
         f.write(doc)
+
+
+# ================================================================ ПРОВЕРКА ЭТИКЕТОК
+import hashlib  # noqa: E402
+
+
+def cargo_ids_on_page(page, ids):
+    """Какие из номеров грузомест напечатаны на странице (целым числом, не частью другого)."""
+    try:
+        raw = page.extract_text() or ""
+    except Exception:
+        raw = ""
+    flat = re.sub(r"\s+", "", raw)
+    out = []
+    for c in ids:
+        pat = rf"(?<!\d){int(c)}(?!\d)"
+        if re.search(pat, raw) or re.search(pat, flat):
+            out.append(int(c))
+    return sorted(set(out))
+
+
+def page_hash(page):
+    """«Отпечаток» страницы: содержимое и картинки (штрихкод). Разные этикетки — разные отпечатки."""
+    h = hashlib.sha1()
+    try:
+        data = page.get_contents()
+        h.update(data.get_data() if data is not None else b"")
+    except Exception:
+        pass
+    try:
+        xo = (page.get("/Resources") or {}).get("/XObject") or {}
+        for name in sorted(xo.keys()):
+            try:
+                h.update(xo[name].get_object().get_data())
+            except Exception:
+                h.update(str(name).encode())
+    except Exception:
+        pass
+    return h.hexdigest()
+
+
+def verify_outputs(batch, bdir):
+    """Итоговая проверка файлов этикеток: каждая этикетка ровно один раз, в файле своего состава,
+    страниц столько же, сколько грузомест."""
+    ships = [s for s in batch["shipments"] if not s.get("cancelled") and s.get("status") == "done"]
+    expected = {}          # номер грузоместа -> (состав, поставка)
+    for s in ships:
+        for b in s["boxes"]:
+            cid = (s.get("cargo_ids") or {}).get(str(b["key"]))
+            if cid:
+                expected[int(cid)] = (f"{b['sku']}x{b['qty']}", s)
+    all_ids = list(expected)
+    groups = {g["id"]: g for g in batch.get("groups") or []}
+    files = [f for f in (batch.get("files") or {}).get("groups") or [] if f.get("file")]
+    problems, bad_ships = [], set()
+    seen, hashes, pages_total, readable = {}, {}, 0, 0
+    for f in files:
+        gname = groups.get(f["id"], {}).get("name", f["id"])
+        gqty = groups.get(f["id"], {}).get("qty", "")
+        for n, page in enumerate(PdfReader(os.path.join(bdir, f["file"])).pages, 1):
+            pages_total += 1
+            where = f"«{gname} × {gqty} шт», стр. {n}"
+            hp = page_hash(page)
+            if hp in hashes:
+                problems.append(f"{where}: такая же страница уже есть ({hashes[hp]})")
+            hashes.setdefault(hp, where)
+            ids = cargo_ids_on_page(page, all_ids)
+            if not ids:
+                continue
+            readable += 1
+            if len(ids) > 1:
+                problems.append(f"{where}: на странице несколько номеров грузомест")
+                continue
+            c = ids[0]
+            if c in seen:
+                problems.append(f"{where}: этикетка грузоместа {c} повторяется (уже была: {seen[c]})")
+                bad_ships.add(expected[c][1].get("key") or expected[c][1]["cluster_id"])
+            seen.setdefault(c, where)
+            if expected[c][0] != f["id"]:
+                problems.append(f"{where}: этикетка грузоместа {c} не из этого состава")
+                bad_ships.add(expected[c][1].get("key") or expected[c][1]["cluster_id"])
+    if pages_total != len(expected):
+        problems.insert(0, f"страниц {pages_total}, а грузомест {len(expected)}")
+    if readable:
+        for c, (gid, s) in expected.items():
+            if c not in seen:
+                g = groups.get(gid, {})
+                problems.append(f"нет этикетки грузоместа {c} ({s['name']}, {g.get('name', gid)} × {g.get('qty', '')} шт)")
+                bad_ships.add(s.get("key") or s["cluster_id"])
+    how = "по номерам грузомест" if readable else "по изображению страниц (номера не читаются)"
+    ok = not problems
+    summary = (f"{len(expected)} этикеток — все разные, по одной на каждое грузоместо (проверено {how})" if ok
+               else f"найдено проблем: {len(problems)}")
+    return {"ok": ok, "summary": summary, "problems": problems[:50], "bad_ships": sorted(bad_ships),
+            "boxes": len(expected), "pages": pages_total, "at": __import__("time").strftime("%d.%m %H:%M")}
