@@ -4,7 +4,10 @@ import ssl
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+
+import tls
 
 BASE_URL = "https://api-seller.ozon.ru"
 
@@ -81,7 +84,7 @@ class OzonClient:
             "Content-Type": "application/json",
         })
         try:
-            with urllib.request.urlopen(req, timeout=60, context=ssl.create_default_context()) as r:
+            with urllib.request.urlopen(req, timeout=60, context=tls.context()) as r:
                 raw = r.read()
                 return r.status, json.loads(raw.decode("utf-8") or "{}")
         except urllib.error.HTTPError as e:
@@ -101,6 +104,9 @@ class OzonClient:
                 status, js = self._raw(path, body)
             except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
                 self._log(f"{path} → сеть: {e}")
+                if tls.is_cert_error(e):           # повторять бесполезно — объясняем причину
+                    u = urllib.parse.urlparse(BASE_URL)
+                    raise OzonError(tls.explain(u.hostname, e, u.port or 443), path=path)
                 if attempt >= retries:
                     raise OzonError(f"Нет связи с Озоном: {e}", path=path)
                 self.sleep(min(5 * attempt, 30) * self.speed)
@@ -137,7 +143,7 @@ class OzonClient:
             headers = {"Client-Id": self.client_id, "Api-Key": self.api_key} if with_auth else {}
             req = urllib.request.Request(url, headers=headers)
             try:
-                with urllib.request.urlopen(req, timeout=120, context=ssl.create_default_context()) as r:
+                with urllib.request.urlopen(req, timeout=120, context=tls.context()) as r:
                     return r.read()
             except urllib.error.HTTPError as e:
                 last_err = e

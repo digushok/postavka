@@ -16,6 +16,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import planner as P
+import tls
 import storage as ST
 import worker as W
 from ozon_api import OzonError
@@ -717,7 +718,7 @@ def api_update(b):
     try:
         req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json",
                                                    "User-Agent": "ozon-supplies-app"})
-        with urllib.request.urlopen(req, timeout=6) as r:
+        with urllib.request.urlopen(req, timeout=6, context=tls.context()) as r:
             js = json.loads(r.read().decode("utf-8"))
         latest = js.get("tag_name") or js.get("name") or ""
         asset = next((a.get("browser_download_url") for a in js.get("assets") or []
@@ -733,7 +734,7 @@ def api_update(b):
 
 
 def api_ping(_):
-    return {"app": "ozon-supplies", "version": VERSION}
+    return {"app": "ozon-supplies", "version": VERSION, "tls": type(tls.context()).__module__.split(".")[0]}
 
 
 def api_quit(_):
