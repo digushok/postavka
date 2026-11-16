@@ -140,7 +140,9 @@ class MockOzon:
     # ---- черновики
     def _new_draft(self, clusters_info):
         known = dict(CLUSTERS)
-        bad = [str(c["macrolocal_cluster_id"]) for c in clusters_info if int(c["macrolocal_cluster_id"]) not in known]
+        refuse = {x.strip() for x in os.environ.get("MOCK_REFUSE", "").split(",") if x.strip()}
+        bad = [str(c["macrolocal_cluster_id"]) for c in clusters_info
+               if int(c["macrolocal_cluster_id"]) not in known or str(c["macrolocal_cluster_id"]) in refuse]
         if bad:
             return {"draft_id": 0, "errors": [{"error_message": "CAN_NOT_CREATE_DRAFT",
                                                "error_reasons": ["NOT_AVAILABLE_CLUSTERS"],

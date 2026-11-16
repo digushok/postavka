@@ -91,7 +91,7 @@ def write_packing(batch, path):
             n = sum(int((a or {}).get(d["id"]) or 0) for a in kits["alloc"].values())
             cells = "".join(f"<td class=r>{int(d['items'].get(p['sku']) or 0)}</td>" for p in prods)
             krows.append(f"<tr><td><b>Набор {e(d['id'])}</b></td>{cells}<td class=r><b>{n}</b></td></tr>")
-        names = {s["cluster_id"]: s["name"] for s in ships}
+        names = {(s.get("key") or s["cluster_id"]): s["name"] for s in ships}
         crows = []
         for cid, a in kits["alloc"].items():
             if cid in names and any(int(v or 0) for v in (a or {}).values()):

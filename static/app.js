@@ -644,13 +644,14 @@ function renderBatch(b) {
       ${!busy && !ships.some((s) => s.order_id && !s.cancelled) ? '<button class="btn ghost" id="bDelete">Удалить из истории</button>' : ""}
     </div></div>
     <div class="meta">
-      <div class="k"><span>Заявки</span><b>${b.multi ? `одна на все города${b.order?.order_id ? " · № " + esc(ships.find((s) => s.order_number)?.order_number || b.order.order_id) : ""}` : "отдельно на каждый город"}</b></div>
+      <div class="k"><span>Заявки</span><b>${b.multi ? `одна на все кластеры${b.order?.order_id ? " · № " + esc(ships.find((s) => s.order_number)?.order_number || b.order.order_id) : ""}` : "отдельно на каждый кластер"}</b></div>
       <div class="k"><span>Точка отгрузки</span><b>${esc(b.dropoff?.name || "—")}</b></div>
       <div class="k"><span>Таймслот</span><b>${esc(slotText)}</b></div>
       <div class="k"><span>Пропуск</span><b>${b.pass?.enabled ? "оформляется" : "нет"}</b></div>
       <div class="k"><span>${b.phase === "cancelled" ? "Отменено" : "Готово"}</span><b>${b.phase === "cancelled" ? `${ships.length} из ${ships.length}` : `${done} из ${active.length}`}</b></div>
     </div>
     <div class="progress ${pct === 100 ? "ok" : ""}"><i style="width:${pct}%"></i></div>
+    ${b.phase !== "cancelling" && ships.some(canReplace) ? `<div class="banner warn" style="margin:14px 0 0"><b>Озон не принял поставку в: ${ships.filter(canReplace).map((s) => esc(s.name)).join(", ")}.</b> Нажмите «Заменить кластер» в строке — можно выбрать любой кластер, в том числе уже выбранный в этой партии.</div>` : ""}
     ${b.phase === "cancelling" ? `<div class="banner" style="margin:14px 0 0">Отменяю заявки в Озоне — это займёт до пары минут. Можно не ждать: итог появится здесь.</div>` : ""}
     ${b.phase === "cancelled" ? `<div class="banner" style="margin:14px 0 0">Все заявки этой партии отменены${b.cancel_result?.at ? " " + esc(b.cancel_result.at) : ""}. Чтобы отправить те же товары снова, нажмите «Создать заново».</div>` : ""}
     ${b.error && b.phase !== "cancelled" ? `<div class="banner err" style="margin:14px 0 0">${esc(b.error)}</div>` : ""}
@@ -658,10 +659,10 @@ function renderBatch(b) {
 
   if (b.phase === "await_slot" && !b.running) h += slotPicker(b);
 
-  h += `<div class="card"><div class="card-h"><div><h2>Поставки</h2></div></div><div class="scroll"><table class="grid"><thead><tr><th>Город</th><th>Кластер в Озоне</th><th>Статус</th><th>Заявка</th><th class="r">Коробок</th><th class="r">Шт</th><th>Таймслот</th><th>Примечания</th><th></th></tr></thead><tbody>` +
+  h += `<div class="card"><div class="card-h"><div><h2>Поставки</h2></div></div><div class="scroll"><table class="grid"><thead><tr><th>Кластер</th><th>По данным Озона</th><th>Статус</th><th>Заявка</th><th class="r">Коробок</th><th class="r">Шт</th><th>Таймслот</th><th>Примечания</th><th></th></tr></thead><tbody>` +
     ships.map((s) => { const cl = s.actual_cluster || s.ozon_cluster_name || s.cluster_name || "—"; return `<tr class="${s.mismatch && !s.cancelled ? "mismatch" : ""} ${s.cancelled ? "dim" : ""}"><td><b>${esc(s.name)}</b></td><td class="small">${esc(cl)}${s.mismatch ? ' <span class="err-text">не тот кластер!</span>' : ""}</td><td>${tag(SST, s.status)}</td><td>${esc(s.order_number || s.order_id || "—")}</td><td class="r">${s.boxes.length}</td><td class="r">${fmt(units(s))}</td><td class="small">${s.slot ? esc(humanSlot(s.slot)) : "—"}</td>
       <td>${typeof s.verified === "number" ? `<div class="good small">✓ состав подтверждён Озоном</div>` : ""}${s.error ? `<div class="err-text">${esc(s.error)}</div>` : ""}${(s.warn || []).map((w) => `<div class="warn-text">${esc(w)}</div>`).join("")}</td>
-      <td class="r">${!busy && !b.multi && s.order_id && !s.cancelled ? `<button class="btn danger sm" data-cancel="${esc(s.cluster_id)}">Отменить</button>` : ""}</td></tr>`; }).join("") + `</tbody></table></div>${b.synced_at ? `<div class="muted small" style="margin-top:8px">Сверено с Озоном ${esc(b.synced_at)}</div>` : ""}</div>`;
+      <td class="r">${!busy && !b.multi && s.order_id && !s.cancelled ? `<button class="btn danger sm" data-cancel="${esc(skey(s))}">Отменить</button>` : ""}${canReplace(s) && b.phase !== "cancelling" ? `<button class="btn soft sm" data-repl="${esc(skey(s))}">Заменить кластер</button>` : ""}</td></tr>`; }).join("") + `</tbody></table></div>${b.synced_at ? `<div class="muted small" style="margin-top:8px">Сверено с Озоном ${esc(b.synced_at)}</div>` : ""}</div>`;
 
   const groups = b.groups || [];
   const files = b.files;
@@ -688,10 +689,16 @@ function renderBatch(b) {
     catch (e) { toast(e.message, true); }
     showBatch(b.id);
   });
+  $$("[data-repl]").forEach((el) => (el.onclick = () => askReplace(b, ships.find((x) => skey(x) === el.dataset.repl))));
+  const ask = ships.find((s) => canReplace(s) && !PROMPTED.has(`${b.id}|${skey(s)}|${s.error}`));
+  if (ask && b.phase !== "cancelling" && $("#modal").classList.contains("hidden")) {
+    PROMPTED.add(`${b.id}|${skey(ask)}|${ask.error}`);
+    setTimeout(() => askReplace(b, ask), 300);
+  }
   $$("[data-cancel]").forEach((el) => (el.onclick = async () => {
-    const s = ships.find((x) => x.cluster_id === el.dataset.cancel);
+    const s = ships.find((x) => skey(x) === el.dataset.cancel);
     if (!(await confirmBox(`<h3>Отменить заявку «${esc(s.name)}» в Озоне?</h3><p>Заявка ${esc(s.order_number || s.order_id)} будет отменена. Это действие нельзя отменить.</p>`, "Отменить заявку"))) return;
-    try { await api("/api/batch/cancel", { id: b.id, cluster_ids: [s.cluster_id] }); }
+    try { await api("/api/batch/cancel", { id: b.id, cluster_ids: [skey(s)] }); }
     catch (e) { toast(e.message, true); }
     showBatch(b.id);
   }));
@@ -717,6 +724,32 @@ function renderBatch(b) {
     await api("/api/batch/slot", { id: b.id, slot: selSlot }); selSlot = null; showBatch(b.id);
   });
   $("#slotRefresh") && ($("#slotRefresh").onclick = async () => { await api("/api/batch/resume", { id: b.id, reset_slot: true }); showBatch(b.id); });
+}
+const skey = (s) => s.key || String(s.cluster_id);
+const canReplace = (s) => !s.cancelled && !s.order_id && (s.status === "error" || s.excluded);
+const PROMPTED = new Set();
+async function askReplace(b, s) {
+  if (!s) return;
+  if (!(APP.clusters || []).length) await loadClusters();
+  const inBatch = new Set(b.shipments.filter((x) => !x.cancelled && x !== s).map((x) => String(x.cluster_id)));
+  const all = (APP.clusters || []).filter((c) => String(c.id) !== String(s.cluster_id));
+  const opt = (c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`;
+  const ok = await confirmBox(`<h3>Озон не принимает поставку в «${esc(s.name)}»</h3>
+    <p class="err-text">${esc(s.error || "Озон отказал")}</p>
+    <p>Куда отправить эти товары (${s.boxes.length} кор., ${fmt(s.boxes.reduce((a, x) => a + x.qty, 0))} шт)?</p>
+    <select id="replSel" style="width:100%">
+      <optgroup label="Уже в этой партии — уйдёт отдельной заявкой">${all.filter((c) => inBatch.has(String(c.id))).map(opt).join("")}</optgroup>
+      <optgroup label="Другие кластеры">${all.filter((c) => !inBatch.has(String(c.id))).map(opt).join("")}</optgroup>
+    </select>
+    <p class="muted small">${b.running ? "Поставки ещё создаются — замена войдёт в этот же запуск." : "Программа сразу создаст поставку в выбранный кластер."}</p>`, "Заменить");
+  const sel = $("#replSel");
+  if (!ok || !sel || !sel.value) return;
+  const c = all.find((x) => String(x.id) === sel.value);
+  try {
+    const r = await api("/api/batch/replace", { id: b.id, key: skey(s), cluster_id: c.id, cluster_name: c.name });
+    toast(r.queued ? `«${s.name}» → «${c.name}»: замена войдёт в текущий запуск` : `«${s.name}» → «${c.name}»: создаю поставку`);
+  } catch (e) { toast(e.message, true); }
+  showBatch(b.id);
 }
 async function showCancelResult(b) {
   const r = b.cancel_result;

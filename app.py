@@ -527,6 +527,27 @@ def api_batch_cancel(b):
     return {"started": True}
 
 
+def api_batch_replace(b):
+    """Перенаправить поставку, которую Озон не принял, в другой кластер."""
+    pid = ST.get_profile()["id"]
+    cid, name = str(b.get("cluster_id") or ""), b.get("cluster_name") or ""
+    if not cid:
+        raise OzonError("Выберите кластер")
+    if W.is_running(b["id"]):
+        bt = ST.load_batch(pid, b["id"])
+        if bt.get("phase") == "cancelling":
+            raise OzonError("Сейчас отменяются заявки — дождитесь окончания")
+        W.REPLACE.setdefault(b["id"], []).append((b["key"], cid, name))
+        return {"queued": True}
+    bt = ST.load_batch(pid, b["id"])
+    W.apply_replacement(bt, b["key"], cid, name)
+    if bt.get("phase") in ("done", "cancelled"):
+        bt["phase"] = "partial"
+    ST.save_batch(pid, bt)
+    W.start(pid, b["id"])
+    return {"started": True}
+
+
 def api_batch_ack(b):
     """Пользователь увидел итог отмены — больше окно не показываем."""
     pid = ST.get_profile()["id"]
@@ -598,7 +619,7 @@ ROUTES = {
     "/api/batch": api_batch, "/api/batch/slot": api_batch_slot, "/api/batch/resume": api_batch_resume,
     "/api/batch/stop": api_batch_stop, "/api/batch/cancel": api_batch_cancel,
     "/api/batch/rebuild": api_batch_rebuild,
-    "/api/batch/ack": api_batch_ack, "/api/batch/delete": api_batch_delete,
+    "/api/batch/ack": api_batch_ack, "/api/batch/replace": api_batch_replace, "/api/batch/delete": api_batch_delete,
     "/api/export": api_export, "/api/import": api_import,
     "/api/legacy/find": api_legacy_find, "/api/legacy/import": api_legacy_import, "/api/batch/sync": api_batch_sync, "/api/open": api_open_folder,
 }

@@ -49,6 +49,50 @@ def make_client(profile, log=None):
     return OzonClient(profile.get("client_id"), profile.get("api_key"), log=log, demo=demo, speed=speed)
 
 
+def skey(s):
+    """Уникальный ключ поставки в партии (кластер может повторяться после замены)."""
+    return s.get("key") or str(s["cluster_id"])
+
+
+REPLACE = {}                 # batch_id -> [(ключ поставки, новый cluster_id, название)] — замены во время работы
+
+
+def replaceable(s):
+    """Поставку можно перенаправить в другой кластер: заявки в Озоне ещё нет, а создать её не удалось."""
+    return not s.get("cancelled") and not s.get("order_id") and (s.get("status") == "error" or s.get("excluded"))
+
+
+def apply_replacement(batch, key, cluster_id, cluster_name):
+    """Перенаправляет поставку в другой кластер (можно в уже выбранный — уйдёт отдельной заявкой)."""
+    s = next((x for x in batch["shipments"] if skey(x) == key), None)
+    if s is None:
+        raise OzonError("Поставка не найдена")
+    if s.get("order_id"):
+        raise OzonError("По этой поставке заявка уже создана — сначала отмените её")
+    old_name = s["name"]
+    cluster_id = str(cluster_id)
+    taken = {skey(x) for x in batch["shipments"] if x is not s}
+    new_key, n = cluster_id, 2
+    while new_key in taken:
+        new_key, n = f"{cluster_id}#{n}", n + 1
+    if s.get("items_orig"):                      # прежний кластер мог выкинуть часть SKU — возвращаем состав
+        s["items"], s["boxes"] = dict(s["items_orig"]), list(s["boxes_orig"])
+    kits = batch.get("kits")
+    if kits and kits.get("alloc") and key in kits["alloc"]:
+        kits["alloc"][new_key] = kits["alloc"].pop(key)
+    s.setdefault("replaced_from", old_name)
+    s.update({"cluster_id": cluster_id, "cluster_name": cluster_name, "name": cluster_name, "key": new_key,
+              "status": "new", "error": None})
+    for f in ("draft_id", "draft_at", "slots", "slots_at", "storage_wh", "ozon_cluster_name", "tried_slots",
+              "excluded", "actual_cluster", "mismatch"):
+        s.pop(f, None)
+    same = any(str(x["cluster_id"]) == cluster_id for x in batch["shipments"] if x is not s)
+    note = f"Кластер заменён: «{old_name}» → «{cluster_name}»" + (" (отдельной заявкой)" if same else "")
+    s.setdefault("warn", []).append(note)
+    batch.setdefault("log", []).append({"t": time.strftime("%H:%M:%S"), "city": cluster_name, "msg": note, "lvl": "info"})
+    return s
+
+
 def norm(name):
     return re.sub(r"[^0-9a-zа-я]+", "", str(name or "").lower().replace("ё", "е"))
 
@@ -126,6 +170,8 @@ class Run:
                             f"проверьте кластер города и создайте партию заново")
 
     def apply_rejected(self, s, rejected):
+        s.setdefault("items_orig", dict(s["items"]))
+        s.setdefault("boxes_orig", list(s["boxes"]))
         names = {p["sku"]: (p.get("short") or p.get("name") or p["sku"]) for p in self.batch["products"]}
         for sku, reasons in rejected.items():
             if sku in s["items"]:
@@ -341,7 +387,7 @@ class Run:
     # по файлам составов (файлы обновляются сразу, их можно печатать не дожидаясь конца).
 
     def pipe_add(self, s):
-        if s["status"] == "done" or s["cluster_id"] in self.failed_now:
+        if s["status"] == "done" or skey(s) in self.failed_now:
             return
         self.pipe.append({"s": s, "stage": "order", "op": None, "chunks": None, "t": time.time()})
 
@@ -364,10 +410,31 @@ class Run:
                 self.pipe.remove(it)
 
     def pipe_drain(self):
-        while self.pipe:
+        while self.pipe or self.take_replacements():
             self.pipe_tick()
             if self.pipe:
                 self.api.sleep(2 * self.api.speed)
+
+    def take_replacements(self):
+        """Применяет замены кластеров, выбранные пользователем во время работы, и запускает эти поставки."""
+        queue = REPLACE.pop(self.bid, [])
+        started = False
+        for key, cid, name in queue:
+            try:
+                s = apply_replacement(self.batch, key, cid, name)
+            except OzonError as e:
+                self.log(str(e), lvl="error")
+                continue
+            self.failed_now.discard(key)
+            self.failed_now.discard(skey(s))
+            self.save()
+            multi_pending = self.batch.get("multi") and not (self.batch.get("order") or {}).get("order_id")
+            if self.batch.get("chosen_slot") and not multi_pending:
+                self.safe(s, self.create_supply)
+                if s.get("order_id"):
+                    self.pipe_add(s)
+                    started = True
+        return started
 
     def idle_until(self, path):
         """Вместо простого ожидания лимита Озона — двигаем конвейер."""
@@ -674,14 +741,14 @@ class Run:
     def ship_error(self, s, e):
         if self.stop.is_set():
             raise OzonError("Остановлено пользователем")
-        self.failed_now.add(s["cluster_id"])
+        self.failed_now.add(skey(s))
         self.set(s, "error", str(e))
         self.log(str(e), s, "error")
 
     def cargo_phase(self, ships):
         """Догоняет все поставки, у которых уже есть заявка (при «Продолжить» и после создания)."""
         for s in ships:
-            if s.get("order_id") and s["status"] != "done" and s["cluster_id"] not in self.failed_now \
+            if s.get("order_id") and s["status"] != "done" and skey(s) not in self.failed_now \
                     and not any(it["s"] is s for it in self.pipe):
                 self.pipe_add(s)
         self.pipe_drain()
@@ -719,6 +786,7 @@ class Run:
     def run(self):
         b = self.batch
         b["error"] = None
+        self.take_replacements()                 # замены, выбранные пока программа не работала
         if b.get("multi"):
             return self.run_multi()
         ships = self.active()
@@ -746,12 +814,14 @@ class Run:
             if s.get("order_id"):
                 self.pipe_add(s)
         for s in ships:
-            if s.get("order_id") or s["cluster_id"] in self.failed_now or s["status"] == "done":
+            if s.get("order_id") or skey(s) in self.failed_now or s["status"] == "done":
                 continue
             self.idle_until("/v2/draft/supply/create")     # пока ждём лимит — двигаем конвейер
             self.safe(s, self.create_supply)
             if s.get("order_id"):
                 self.pipe_add(s)
+
+        self.take_replacements()
 
         # 3. Догоняем грузоместа, этикетки, пропуска
         b["phase"] = "cargo"
@@ -783,6 +853,7 @@ class Run:
                          f"{S.summary(plan)}", lvl="info" if inside == len(plan) else "warn")
             self.save()
             return True
+        self.take_replacements()                 # без таймслота — только применяем замену
         b["phase"] = "await_slot"
         b["slot_deadline"] = oldest_draft_at + DRAFT_TTL
         self.log("Черновики готовы — выберите таймслот")
@@ -870,6 +941,12 @@ class Run:
 
         b["phase"] = "cargo"
         self.save()
+        for s in self.active():                  # заменённые кластеры — отдельными заявками
+            if not s.get("order_id") and s["status"] == "new" and not s.get("excluded"):
+                self.safe(s, self.create_supply)
+                if s.get("order_id"):
+                    live.append(s)
+        self.take_replacements()
         self.cargo_phase(live)
         if any(s["status"] == "done" for s in live):
             self.make_pass(M["order_id"], M)
@@ -881,7 +958,12 @@ class Run:
 
     def create_multi_draft(self, M):
         """Черновик на несколько кластеров. Кластеры, которые Озон не принимает, исключаются."""
-        ships = [s for s in self.active() if not s.get("excluded")]
+        ships, seen = [], set()
+        for s in self.active():
+            if s.get("excluded") or str(s["cluster_id"]) in seen:
+                continue                      # второй раз тот же кластер — пойдёт отдельной заявкой
+            seen.add(str(s["cluster_id"]))
+            ships.append(s)
         for attempt in range(3):
             self.check_stop()
             if not ships:
@@ -941,21 +1023,21 @@ class Run:
             if self.stop.is_set():
                 self.set(s, s["status"], "остановлено")
                 raise
-            self.failed_now.add(s["cluster_id"])
+            self.failed_now.add(skey(s))
             self.set(s, "error", str(e))
             self.log(str(e), s, "error")
         except Exception as e:  # неожиданная ошибка — пишем подробно в api.log
             self._api_log(traceback.format_exc())
-            self.failed_now.add(s["cluster_id"])
+            self.failed_now.add(skey(s))
             self.set(s, "error", f"Внутренняя ошибка: {e}")
             self.log(f"Внутренняя ошибка: {e}", s, "error")
 
     def rebuild_outputs(self):
         b = self.batch
         act = self.active()
-        names = {s["cluster_id"]: s["name"] for s in act}
-        b["groups"] = P.group_boxes({s["cluster_id"]: s["boxes"] for s in act}, b["products"],
-                                    [s["cluster_id"] for s in act], names)
+        names = {skey(s): s["name"] for s in act}
+        b["groups"] = P.group_boxes({skey(s): s["boxes"] for s in act}, b["products"],
+                                    [skey(s) for s in act], names)
         b["files"] = L.build_outputs(b, self.dir)
         self.save()
 
@@ -985,6 +1067,9 @@ def start(pid, bid):
         finally:
             if r:
                 r._apilog.close()
+            if REPLACE.get(bid) and not stop.is_set():
+                # замену выбрали, когда работа уже заканчивалась — запускаем ещё раз
+                threading.Timer(0.3, lambda: start(pid, bid)).start()
 
     t = threading.Thread(target=target, daemon=True)
     RUNNING[bid] = (t, stop)
@@ -1095,7 +1180,7 @@ def _cancel_job(pid, bid, cluster_ids):
 
     try:
         targets = [s for s in batch["shipments"] if not s.get("cancelled")
-                   and (not cluster_ids or s["cluster_id"] in cluster_ids)]
+                   and (not cluster_ids or skey(s) in cluster_ids)]
         orders = {}
         for s in targets:
             if s.get("order_id"):
