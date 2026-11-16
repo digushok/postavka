@@ -91,13 +91,7 @@ async function loadClusters() {
       }
     }
     if (changed) await saveProfile({ templates: P.templates });
-    if (D) for (const c of D.cities) {
-      if (!c.cluster_id) {
-        const m = (c.match || c.name || "").toLowerCase();
-        const hit = findCluster(m);
-        if (hit) { c.cluster_id = hit.id; c.cluster_name = hit.name; }
-      }
-    }
+    if (D) bindRows();
   } catch (e) {
     APP.clusters = [];
     $("#clusterNote").innerHTML = `<span class="err-text">Не удалось загрузить кластеры: ${esc(e.message)}</span>`;
@@ -122,19 +116,17 @@ function newDraft() {
   const ts = P.timeslot || {};
   return {
     products: [], template: tpl ? tpl.name : "",
-    cities: tpl ? JSON.parse(JSON.stringify(tpl.cities)) : [],
+    rows: rowsFromTemplate(tpl), mode: "share", kits: { defs: [], alloc: {}, manual: false },
     method: P.method || "remainder_city", remCity: P.remainder_city || "largest",
-    matrix: null, edited: {},
     tsmode: ts.mode || "auto",
     ts: { d1: addDays(ts.days_from ?? 2), t1: ts.time_from || "10:00" },
     passOn: !!(P.pass && P.pass.enabled), dropoff: P.dropoff || null, multi: false, cv: 2,
   };
 }
 function saveDraft() { lsSet(draftKey(), D); }
-const cityKey = (c) => (c.cluster_id ? String(c.cluster_id) : "?" + c.name);
 
 function renderNew() {
-  renderProducts(); renderCities(); renderShipping();
+  renderProducts(); renderDistControls(); renderShipping();
   replan();
 }
 
@@ -179,6 +171,7 @@ $("#prodTable").addEventListener("change", async (e) => {
   else if (t.classList.contains("p-box")) { p.box_size = num(t.value) || null; if (!p.box_size) p.multiple = false; else if (p.multiple === undefined) p.multiple = true; rememberProduct(p); renderProducts(); }
   else if (t.classList.contains("p-mult")) { p.multiple = t.checked; rememberProduct(p); }
   else if (t.classList.contains("p-qty")) { p.qty = num(t.value); }
+  if (D.mode === "kits" && !D.kits.manual) await autoKits();
   saveDraft(); replan();
 });
 const rememberProduct = debounce(async (p) => {
@@ -223,66 +216,261 @@ $("#pasteApply").onclick = async () => {
   saveDraft(); renderProducts(); await lookup(added);
 };
 
-/* ---- города ---- */
-function renderCities() {
+/* ---- распределение по кластерам: одна таблица ---- */
+// D.rows: [{cluster_id, cluster_name, share, fixed}] — fixed: {sku: qty}, если количество в строке правили вручную
+// D.mode: "share" (по долям) | "kits" (наборами); D.kits: {defs:[{id, items:{sku:qty}}], alloc:{cid:{id:n}}, manual}
+const prodsOf = () => D.products.filter((p) => p.sku);
+const totalOf = (row) => Object.values(row || {}).reduce((a, v) => a + (+v || 0), 0);
+const purchaseTotal = () => prodsOf().reduce((a, p) => a + (p.qty || 0), 0);
+const pct = (v) => (Math.round(v * 10) / 10).toLocaleString("ru-RU");
+const rowName = (r) => r.cluster_name || ((APP.clusters || []).find((c) => String(c.id) === String(r.cluster_id)) || {}).name || r.cluster_id;
+
+function migrateDraft(d) {
+  // старая форма: города + отдельный кластер + матрица с правками по ячейкам
+  if (!d.rows) {
+    d.rows = (d.cities || []).map((c) => {
+      const row = { cluster_id: c.cluster_id || null, cluster_name: c.cluster_name || null, share: +c.share || 0, match: c.match || c.cluster_name || c.name, fixed: null };
+      const key = c.cluster_id ? String(c.cluster_id) : "?" + c.name;
+      if (d.edited && Object.keys(d.edited).some((k) => k.startsWith(key + "|")) && d.matrix && d.matrix[key]) row.fixed = { ...d.matrix[key] };
+      return row;
+    });
+    delete d.cities; delete d.edited; delete d.matrix;
+  }
+  d.mode = d.mode || "share";
+  d.kits = d.kits || { defs: [], alloc: {}, manual: false };
+  return d;
+}
+function rowsFromTemplate(t) {
+  return (t ? t.cities : []).map((c) => ({ cluster_id: c.cluster_id || null, cluster_name: c.cluster_name || null, share: +c.share || 0, match: c.match || c.cluster_name || c.name, fixed: null }));
+}
+function bindRows() {
+  // кластеры без ID (из старых шаблонов) — находим по названию; дубли убираем
+  const seen = new Set();
+  D.rows = D.rows.filter((r) => {
+    if (!r.cluster_id && APP.clusters?.length) { const hit = findCluster(r.match || r.cluster_name || ""); if (hit) { r.cluster_id = hit.id; r.cluster_name = hit.name; } }
+    if (r.cluster_id && !r.cluster_name) r.cluster_name = rowName(r);
+    const k = String(r.cluster_id || "?" + (r.match || ""));
+    if (seen.has(k)) return false; seen.add(k); return true;
+  });
+}
+const rowKey = (r) => (r.cluster_id ? String(r.cluster_id) : "?" + (r.match || r.cluster_name || ""));
+
+function renderDistControls() {
   const P = APP.profile;
+  $$("input[name=dmode]").forEach((x) => (x.checked = x.value === D.mode));
   $("#tplSel").innerHTML = P.templates.map((t) => `<option ${t.name === D.template ? "selected" : ""}>${esc(t.name)}</option>`).join("");
-  const opts = (sel) => (APP.clusters || []).map((c) => `<option value="${esc(c.id)}" ${String(sel) === String(c.id) ? "selected" : ""}>${esc(c.name)}</option>`).join("");
-  $("#cityTable tbody").innerHTML = D.cities.map((c, i) => `<tr data-i="${i}">
-      <td><input class="c-name" value="${esc(c.name)}"></td>
-      <td><select class="c-cl ${c.cluster_id ? "" : "bad"}"><option value="">${c.cluster_id ? "" : "— выберите кластер —"}</option>${opts(c.cluster_id)}${c.cluster_id && !(APP.clusters || []).some((x) => String(x.id) === String(c.cluster_id)) ? `<option value="${esc(c.cluster_id)}" selected>${esc(c.cluster_name || c.cluster_id)}</option>` : ""}</select></td>
-      <td><input class="c-share" type="number" min="0" step="0.5" value="${c.share}"></td>
-      <td><button class="x" title="Убрать">×</button></td></tr>`).join("");
-  const sum = D.cities.reduce((a, c) => a + (parseFloat(c.share) || 0), 0);
-  $("#shareSum").innerHTML = `<span class="${Math.abs(sum - 100) < 0.001 ? "good" : "warn-text"}">${+sum.toFixed(2)}%</span>`;
   $("#method").value = D.method;
-  $("#remCityWrap").classList.toggle("hidden", D.method !== "remainder_city" && D.method !== "fair");
-  $("#remCityWrap").firstChild.textContent = D.method === "fair" ? "Город для рассыпных штук" : "Город для остатка";
-  $("#remCity").innerHTML = `<option value="largest">С наибольшей долей</option>` +
-    D.cities.map((c) => `<option value="${esc(cityKey(c))}" ${D.remCity === cityKey(c) ? "selected" : ""}>${esc(c.name)}</option>`).join("");
+  $("#methodWrap").classList.toggle("hidden", D.mode !== "share");
+  $("#remCityWrap").classList.toggle("hidden", D.mode === "share" && D.method === "floor");
+  $("#remCityLbl").textContent = D.mode === "kits" ? "Набор В (остаток) — в кластер" : "Кластер для остатка";
+  $("#remCity").innerHTML = `<option value="largest">с наибольшей долей</option>` +
+    D.rows.filter((r) => r.cluster_id).map((r) => `<option value="${esc(r.cluster_id)}" ${String(D.remCity) === String(r.cluster_id) ? "selected" : ""}>${esc(rowName(r))}</option>`).join("");
   if (![...$("#remCity").options].some((o) => o.selected)) $("#remCity").value = "largest";
+  const used = new Set(D.rows.map((r) => String(r.cluster_id)));
+  const free = (APP.clusters || []).filter((c) => !used.has(String(c.id)));
+  $("#addCluster").innerHTML = free.length ? `<option value="">Добавить кластер…</option>` + free.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("") : `<option value="">Все кластеры уже в таблице</option>`;
+  $("#kitsBlock").classList.toggle("hidden", D.mode !== "kits");
+  $("#distSub").textContent = D.mode === "kits"
+    ? "Каждый кластер получает целые наборы (А, Б, В…). Меняйте доли, число наборов или их состав — всё пересчитается"
+    : "Меняйте доли или количество прямо в таблице — остальное пересчитается";
 }
-$("#cityTable").addEventListener("change", (e) => {
-  const tr = e.target.closest("tr"); if (!tr) return;
-  const c = D.cities[+tr.dataset.i]; const t = e.target;
-  const oldKey = cityKey(c);
-  if (t.classList.contains("c-name")) c.name = t.value.trim();
-  if (t.classList.contains("c-cl")) { c.cluster_id = t.value || null; c.cluster_name = t.selectedOptions[0]?.textContent || ""; }
-  if (t.classList.contains("c-share")) c.share = parseFloat(t.value) || 0;
-  const nk = cityKey(c);
-  if (nk !== oldKey) moveCityKey(oldKey, nk);
-  saveDraft(); renderCities(); replan();
-});
-$("#cityTable").addEventListener("click", (e) => {
-  if (!e.target.classList.contains("x")) return;
-  D.cities.splice(+e.target.closest("tr").dataset.i, 1); saveDraft(); renderCities(); replan();
-});
-function moveCityKey(a, b) {
-  if (D.matrix && D.matrix[a]) { D.matrix[b] = D.matrix[a]; delete D.matrix[a]; }
-  for (const k of Object.keys(D.edited)) if (k.startsWith(a + "|")) { D.edited[b + k.slice(a.length)] = 1; delete D.edited[k]; }
-  if (D.remCity === a) D.remCity = b;
+
+function renderDist() {
+  renderDistControls();
+  const prods = prodsOf();
+  const M = PLAN?.matrix || {};
+  const buy = Object.fromEntries(prods.map((p) => [p.sku, p.qty || 0]));
+  const tot = purchaseTotal();
+  if (!prods.length || !D.rows.length) {
+    $("#dist").innerHTML = `<tr class="empty"><td>Добавьте товары в шаге 1 и кластеры кнопкой «+ Кластер».</td></tr>`;
+    $("#kitsTable").innerHTML = ""; $("#distWarn").innerHTML = ""; renderSummary(); return;
+  }
+  const kits = D.mode === "kits";
+  const defs = D.kits.defs || [];
+  let h = `<thead><tr><th>Кластер Озона</th><th>Доля, %</th>${kits ? `<th>Факт, %</th>` + defs.map((d) => `<th class="kit">Набор ${esc(d.id)}</th>`).join("") : ""}${prods.map((p) => `<th title="${esc(p.name || "")}">${esc(prodLabel(p))}</th>`).join("")}<th>Всего</th><th>Коробок</th><th></th></tr></thead><tbody>`;
+  const col = {}; let offCells = 0;
+  for (const r of D.rows) {
+    const k = rowKey(r); const row = M[k] || {};
+    const rt = totalOf(row);
+    const actual = tot ? rt / tot * 100 : 0;
+    const shareShown = !kits && r.fixed ? actual : +r.share || 0;
+    h += `<tr data-k="${esc(k)}"><td class="cl" title="${esc(rowName(r))}">${esc(rowName(r))}${r.cluster_id ? "" : ' <span class="err-text">не найден в Озоне</span>'}${!kits && r.fixed ? `<span class="manual" data-reset="${esc(k)}" title="Количество задано вручную. Нажмите, чтобы снова считать от доли">вручную ↺</span>` : ""}</td>
+      <td><input class="share" type="number" min="0" step="0.5" value="${+shareShown.toFixed(1)}" data-share="${esc(k)}"></td>`;
+    if (kits) {
+      const dev = actual - (+r.share || 0);
+      h += `<td class="ro">${pct(actual)}${Math.abs(dev) >= 0.05 ? `<span class="dev ${Math.abs(dev) > 1.5 ? "bad-mark" : "muted"}">${dev > 0 ? "+" : ""}${pct(dev)}</span>` : ""}</td>`;
+      h += defs.map((d) => `<td class="kitc"><input class="kitn" type="number" min="0" value="${(D.kits.alloc[k] || {})[d.id] || 0}" data-kc="${esc(k)}" data-kid="${esc(d.id)}"></td>`).join("");
+    }
+    for (const p of prods) {
+      const v = row[p.sku] ?? 0;
+      col[p.sku] = (col[p.sku] || 0) + v;
+      const skuShare = buy[p.sku] ? v / buy[p.sku] * 100 : 0;
+      const off = !kits && rt > 0 && buy[p.sku] && Math.abs(skuShare - actual) > 0.5;   // в наборах округление — норма
+      if (off) offCells++;
+      h += kits ? `<td class="ro ${off ? "warn-text" : ""}" title="${off ? `доля по этому SKU ${pct(skuShare)}%` : ""}">${fmt(v)}</td>`
+        : `<td><input type="number" min="0" value="${v}" data-c="${esc(k)}" data-s="${esc(p.sku)}" class="${off ? "off" : ""}" title="${off ? `Доля по этому SKU ${pct(skuShare)}%, а по кластеру ${pct(actual)}%` : ""}"></td>`;
+    }
+    h += `<td class="tot">${fmt(rt)}</td><td class="boxes">${fmt((PLAN?.boxes || {})[k] || 0)}</td><td><button class="x" data-del="${esc(k)}" title="Убрать кластер">×</button></td></tr>`;
+  }
+  const allTot = prods.reduce((a, p) => a + (col[p.sku] || 0), 0);
+  const shareSum = D.rows.reduce((a, r) => a + (+r.share || 0), 0);
+  const pad = kits ? `<td></td>` + defs.map((d) => `<td class="kitc ro"><b>${Object.values(D.kits.alloc).reduce((a, x) => a + (+(x || {})[d.id] || 0), 0)}</b></td>`).join("") : "";
+  h += `</tbody><tfoot>
+    <tr><td class="lbl">Распределено</td><td class="${Math.abs(shareSum - 100) < 0.05 ? "ok-mark" : "bad-mark"}" title="Сумма долей">${pct(shareSum)}%</td>${pad}${prods.map((p) => `<td>${fmt(col[p.sku] || 0)}</td>`).join("")}<td>${fmt(allTot)}</td><td>${fmt(Object.values(PLAN?.boxes || {}).reduce((a, b) => a + b, 0))}</td><td></td></tr>
+    <tr><td class="lbl">Закуплено</td><td></td>${kits ? `<td></td>` + defs.map(() => "<td></td>").join("") : ""}${prods.map((p) => `<td><input type="number" min="0" value="${p.qty || 0}" data-buy="${esc(p.sku)}"></td>`).join("")}<td class="sub">${fmt(tot)}</td><td></td><td></td></tr>
+    <tr><td class="lbl">Проверка</td><td></td>${kits ? `<td></td>` + defs.map(() => "<td></td>").join("") : ""}${prods.map((p) => { const d = (col[p.sku] || 0) - (p.qty || 0); return `<td class="${d ? "bad-mark" : "ok-mark"}">${d ? (d > 0 ? "+" : "") + fmt(d) : "✓"}</td>`; }).join("")}<td class="${allTot - tot ? "bad-mark" : "ok-mark"}">${allTot - tot ? (allTot - tot > 0 ? "+" : "") + fmt(allTot - tot) : "✓"}</td><td></td><td></td></tr>
+  </tfoot>`;
+  $("#dist").innerHTML = h;
+  const diffs = prods.some((p) => (col[p.sku] || 0) !== (p.qty || 0));
+  $("#restBtn").classList.toggle("hidden", !(diffs && D.mode === "share"));
+  const manualRows = D.rows.filter((r) => r.fixed).length;
+  $("#editedNote").classList.toggle("hidden", !(D.mode === "share" && manualRows));
+  $("#editedNote").textContent = `вручную: ${manualRows} кластер.`;
+  let warn = "";
+  if (offCells) warn += `<div class="banner warn" style="margin-top:10px">Доля кластера уже не одинакова по всем SKU — такие ячейки подсвечены (наведите, чтобы увидеть долю по SKU).</div>`;
+  if (Math.abs(shareSum - 100) >= 0.05 && D.mode === "share") warn += `<div class="banner warn" style="margin-top:10px">Сумма долей ${pct(shareSum)}%, а не 100%.</div>`;
+  if (kits && (D.kits.warn || []).length) warn += D.kits.warn.map((w) => `<div class="banner err" style="margin-top:10px">${esc(w)}</div>`).join("");
+  $("#distWarn").innerHTML = warn;
+  if (kits) renderKits();
+  renderSummary();
 }
-$("#addCity").onclick = () => { D.cities.push({ name: "Новый город", cluster_id: null, share: 5 }); saveDraft(); renderCities(); replan(); };
-$("#method").onchange = (e) => { D.method = e.target.value; saveDraft(); renderCities(); replan(); };
-$("#remCity").onchange = (e) => { D.remCity = e.target.value; saveDraft(); replan(); };
+
+function renderKits() {
+  const prods = prodsOf();
+  const defs = D.kits.defs || [];
+  $("#kitsManual").classList.toggle("hidden", !D.kits.manual);
+  $("#kitsTable").innerHTML = defs.length ? `<thead><tr><th>Набор</th>${prods.map((p) => `<th>${esc(prodLabel(p))}</th>`).join("")}<th>Штук в наборе</th><th>Коробок в наборе</th><th>Наборов в поставке</th><th></th></tr></thead><tbody>` +
+    defs.map((d) => {
+      const n = Object.values(D.kits.alloc).reduce((a, x) => a + (+(x || {})[d.id] || 0), 0);
+      const boxes = prods.reduce((a, p) => a + splitCount(d.items[p.sku], p.box_size), 0);
+      return `<tr><td class="cl">Набор ${esc(d.id)}</td>${prods.map((p) => `<td><input type="number" min="0" value="${d.items[p.sku] || 0}" data-kd="${esc(d.id)}" data-ks="${esc(p.sku)}"></td>`).join("")}
+        <td class="tot">${fmt(totalOf(d.items))}</td><td class="ro">${boxes}</td><td class="boxes">${n}</td><td><button class="x" data-kdel="${esc(d.id)}" title="Удалить набор">×</button></td></tr>`;
+    }).join("") + "</tbody>"
+    : `<tr class="empty"><td>Нажмите «Подобрать по долям» — программа сама рассчитает наборы.</td></tr>`;
+  const st = D.kits.step || 2.5;
+  $("#kitsNote").innerHTML = defs.length ? `Шаг доли ${pct(st)}%: набор Б ≈ ${pct(st)}% закупки, набор А ≈ ${pct(st * 2)}%; остаток от округления — в набор В. «Факт» в таблице выше — доля по наборам, рядом отклонение от цели.` : "";
+}
+const splitCount = (q, box) => { q = +q || 0; box = +box || 0; return q <= 0 ? 0 : box > 0 ? Math.ceil(q / box) : 1; };
+
+async function autoKits() {
+  const prods = prodsOf();
+  if (!prods.length || !D.rows.some((r) => r.cluster_id)) return;
+  try {
+    const r = await api("/api/kits/auto", { products: prods, rows: D.rows.filter((x) => x.cluster_id).map((x) => ({ key: String(x.cluster_id), share: x.share })), remainder_city: D.remCity, step: 2.5, big_steps: 2 });
+    D.kits = { defs: r.defs, alloc: r.alloc, manual: false, step: r.step, warn: r.warn || [] };
+    saveDraft();
+  } catch (e) { toast(e.message, true); }
+}
+
+// изменения в таблице
+$("#dist").addEventListener("change", async (e) => {
+  const t = e.target;
+  if (t.dataset.share !== undefined) {                       // доля → строка считается от доли
+    const r = D.rows.find((x) => rowKey(x) === t.dataset.share);
+    r.share = parseFloat(String(t.value).replace(",", ".")) || 0; r.fixed = null;
+    if (D.mode === "kits" && !D.kits.manual) await autoKits();
+  } else if (t.dataset.c !== undefined) {                    // количество → строка «вручную», доля из факта
+    const r = D.rows.find((x) => rowKey(x) === t.dataset.c);
+    if (!r.fixed) r.share_before = r.share;                    // для «↺» — вернуть исходную долю
+    r.fixed = { ...((PLAN?.matrix || {})[t.dataset.c] || {}) }; r.fixed[t.dataset.s] = num(t.value);
+    const tot = purchaseTotal(); r.share = tot ? Math.round(totalOf(r.fixed) / tot * 1000) / 10 : 0;
+  } else if (t.dataset.buy !== undefined) {                  // закупка
+    const p = D.products.find((x) => x.sku === t.dataset.buy); p.qty = num(t.value);
+    for (const r of D.rows) if (r.fixed) { const tot = purchaseTotal(); r.share = tot ? Math.round(totalOf(r.fixed) / tot * 1000) / 10 : 0; }
+    renderProducts();
+    if (D.mode === "kits" && !D.kits.manual) await autoKits();
+  } else if (t.dataset.kc !== undefined) {                   // число наборов у кластера
+    D.kits.alloc[t.dataset.kc] = D.kits.alloc[t.dataset.kc] || {};
+    D.kits.alloc[t.dataset.kc][t.dataset.kid] = num(t.value); D.kits.manual = true;
+  } else return;
+  saveDraft(); replan();
+});
+$("#dist").addEventListener("click", async (e) => {
+  const t = e.target;
+  if (t.dataset.del !== undefined) {
+    D.rows = D.rows.filter((r) => rowKey(r) !== t.dataset.del);
+    delete D.kits.alloc[t.dataset.del];
+    if (D.mode === "kits" && !D.kits.manual) await autoKits();
+    saveDraft(); replan();
+  } else if (t.dataset.reset !== undefined) {
+    const r = D.rows.find((x) => rowKey(x) === t.dataset.reset);
+    r.fixed = null; if (r.share_before !== undefined) { r.share = r.share_before; delete r.share_before; }
+    saveDraft(); replan();
+  }
+});
+$("#dist").addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || e.target.tagName !== "INPUT") return;
+  e.preventDefault();
+  const ins = $$("#dist tbody input"); const i = ins.indexOf(e.target); const step = $$("#dist tbody tr")[0].querySelectorAll("input").length;
+  const next = ins[i + step] || ins[0]; next.focus(); next.select();
+});
+$("#kitsTable").addEventListener("change", (e) => {
+  const t = e.target; if (t.dataset.kd === undefined) return;
+  const d = D.kits.defs.find((x) => x.id === t.dataset.kd); d.items[t.dataset.ks] = num(t.value);
+  D.kits.manual = true; saveDraft(); replan();
+});
+$("#kitsTable").addEventListener("click", (e) => {
+  const id = e.target.dataset.kdel; if (id === undefined) return;
+  D.kits.defs = D.kits.defs.filter((d) => d.id !== id);
+  for (const a of Object.values(D.kits.alloc)) if (a) delete a[id];
+  D.kits.manual = true; saveDraft(); replan();
+});
+$("#kitAdd").onclick = () => {
+  const names = ["А", "Б", "В", "Г", "Д", "Е", "Ж", "З", "И", "К"];
+  const id = names.find((n) => !D.kits.defs.some((d) => d.id === n)) || "Н" + (D.kits.defs.length + 1);
+  D.kits.defs.push({ id, items: Object.fromEntries(prodsOf().map((p) => [p.sku, 0])) });
+  D.kits.manual = true; saveDraft(); replan();
+};
+$("#kitsAuto").onclick = async () => {
+  if (D.kits.manual && !(await confirmBox("<h3>Подобрать наборы заново?</h3><p>Ручные правки наборов будут заменены расчётом по долям.</p>", "Подобрать"))) return;
+  await autoKits(); replan();
+};
+$$("input[name=dmode]").forEach((x) => (x.onchange = async () => {
+  D.mode = x.value;
+  if (D.mode === "kits" && !(D.kits.defs || []).length) await autoKits();
+  saveDraft(); replan();
+}));
+$("#addClusterBtn").onclick = async () => {
+  const id = $("#addCluster").value; if (!id) return toast("Выберите кластер в списке");
+  const c = (APP.clusters || []).find((x) => String(x.id) === id);
+  D.rows.push({ cluster_id: id, cluster_name: c ? c.name : id, share: 0, fixed: null });
+  saveDraft(); renderDistControls(); replan();
+  toast(`«${c ? c.name : id}» добавлен — укажите долю`);
+};
+$("#restBtn").onclick = () => {
+  const target = D.remCity !== "largest" ? D.rows.find((r) => String(r.cluster_id) === String(D.remCity))
+    : [...D.rows].sort((a, b) => (+b.share || 0) - (+a.share || 0))[0];
+  if (!target) return;
+  const k = rowKey(target); const M = PLAN?.matrix || {};
+  const col = {}; for (const r of D.rows) for (const [s, v] of Object.entries(M[rowKey(r)] || {})) col[s] = (col[s] || 0) + v;
+  if (!target.fixed) target.share_before = target.share;
+  target.fixed = { ...(M[k] || {}) };
+  for (const p of prodsOf()) target.fixed[p.sku] = Math.max(0, (target.fixed[p.sku] || 0) + (p.qty || 0) - (col[p.sku] || 0));
+  const tot = purchaseTotal(); target.share = tot ? Math.round(totalOf(target.fixed) / tot * 1000) / 10 : 0;
+  saveDraft(); replan(); toast(`Остаток добавлен в «${rowName(target)}»`);
+};
+$("#method").onchange = (e) => { D.method = e.target.value; saveDraft(); replan(); };
+$("#remCity").onchange = async (e) => { D.remCity = e.target.value; if (D.mode === "kits" && !D.kits.manual) await autoKits(); saveDraft(); replan(); };
+$("#recalc").onclick = async () => { for (const r of D.rows) { if (r.fixed && r.share_before !== undefined) r.share = r.share_before; r.fixed = null; delete r.share_before; } if (D.mode === "kits") await autoKits(); saveDraft(); replan(); };
 $("#tplSel").onchange = async (e) => {
   const t = APP.profile.templates.find((x) => x.name === e.target.value);
   if (!t) return;
-  D.template = t.name; D.cities = JSON.parse(JSON.stringify(t.cities)); D.edited = {}; D.matrix = null;
+  D.template = t.name; D.rows = rowsFromTemplate(t); bindRows();
   await saveProfile({ template: t.name });
-  saveDraft(); renderCities(); replan();
+  if (D.mode === "kits") await autoKits();
+  saveDraft(); replan();
 };
 async function saveTemplate(name) {
   const tpls = APP.profile.templates.filter((t) => t.name !== name);
-  const cities = D.cities.map(({ name, cluster_id, cluster_name, share, match }) => ({ name, cluster_id, cluster_name, share, match }));
+  const cities = D.rows.filter((r) => r.cluster_id).map((r) => ({ name: rowName(r), cluster_id: r.cluster_id, cluster_name: rowName(r), share: +r.share || 0, match: r.match || rowName(r) }));
   const idx = APP.profile.templates.findIndex((t) => t.name === name);
   if (idx >= 0) tpls.splice(idx, 0, { name, cities }); else tpls.push({ name, cities });
   await saveProfile({ templates: tpls, template: name, method: D.method, remainder_city: D.remCity });
-  D.template = name; saveDraft(); renderCities(); toast(`Шаблон «${name}» сохранён`);
+  D.template = name; saveDraft(); renderDistControls(); toast(`Шаблон «${name}» сохранён`);
 }
 $("#tplSave").onclick = () => saveTemplate(D.template || "Основной");
 $("#tplSaveAs").onclick = async () => {
-  const ok = await confirmBox(`<h3>Новый шаблон городов</h3><input id="promptIn" placeholder="Название, например «Без Москвы»">`, "Сохранить");
+  const ok = await confirmBox(`<h3>Новый шаблон кластеров</h3><input id="promptIn" placeholder="Название, например «Без Москвы»">`, "Сохранить");
   const name = ok ? (promptBox._v || "").trim() : "";
   promptBox._v = "";
   if (name) saveTemplate(name);
@@ -290,60 +478,17 @@ $("#tplSaveAs").onclick = async () => {
 
 /* ---- расчёт ---- */
 const replan = debounce(async () => {
+  bindRows();
   const body = {
-    products: D.products.filter((p) => p.sku), method: D.method, remainder_city: D.remCity,
-    cities: D.cities.map((c) => ({ key: cityKey(c), share: c.share, name: c.name })),
-    matrix: Object.keys(D.edited).length ? D.matrix : null, edited: D.edited,
+    products: prodsOf().map((p) => ({ ...p, short: prodLabel(p) })), mode: D.mode, method: D.method, remainder_city: D.remCity,
+    rows: D.rows.map((r) => ({ key: rowKey(r), share: r.share, name: rowName(r), fixed: r.fixed })),
+    kits: { defs: D.kits.defs, alloc: D.kits.alloc },
   };
-  body.products = body.products.map((p) => ({ ...p, short: prodLabel(p) }));
   try {
     PLAN = await api("/api/plan", body);
-    D.matrix = PLAN.matrix; saveDraft();
-    renderMatrix(); renderGroups();
+    renderDist(); renderGroups();
   } catch (e) { toast(e.message, true); }
 }, 150);
-
-function renderMatrix() {
-  const prods = D.products.filter((p) => p.sku);
-  const M = D.matrix || {};
-  if (!prods.length || !D.cities.length) { $("#matrix").innerHTML = `<tr class="empty"><td>Здесь появится таблица, когда добавите товары и города.</td></tr>`; $("#editedNote").classList.add("hidden"); return; }
-  let h = `<thead><tr><th>Город</th><th>Доля</th>${prods.map((p) => `<th title="${esc(p.name || "")}">${esc(prodLabel(p))}</th>`).join("")}<th>Всего шт</th><th>Коробок</th></tr></thead><tbody>`;
-  const colSum = {};
-  for (const c of D.cities) {
-    const k = cityKey(c); let rowSum = 0;
-    h += `<tr><td class="city">${esc(c.name)}${c.cluster_id ? "" : ' <span class="err-text">нет кластера</span>'}</td><td class="share">${+(+c.share).toFixed(2)}%</td>`;
-    for (const p of prods) {
-      const v = (M[k] || {})[p.sku] ?? 0;
-      rowSum += v; colSum[p.sku] = (colSum[p.sku] || 0) + v;
-      const ed = D.edited[k + "|" + p.sku];
-      h += `<td><input type="number" min="0" data-c="${esc(k)}" data-s="${esc(p.sku)}" value="${v}" class="${ed ? "edited" : ""}"></td>`;
-    }
-    h += `<td class="tot">${fmt(rowSum)}</td><td class="boxes">${fmt((PLAN?.boxes || {})[k] || 0)}</td></tr>`;
-  }
-  const tot = prods.reduce((a, p) => a + (colSum[p.sku] || 0), 0);
-  const bought = prods.reduce((a, p) => a + (p.qty || 0), 0);
-  h += `</tbody><tfoot><tr><td class="lbl">Распределено</td><td></td>${prods.map((p) => `<td>${fmt(colSum[p.sku] || 0)}</td>`).join("")}<td>${fmt(tot)}</td><td>${fmt(Object.values(PLAN?.boxes || {}).reduce((a, b) => a + b, 0))}</td></tr>`;
-  h += `<tr><td class="lbl">Закуплено</td><td></td>${prods.map((p) => `<td class="sub">${fmt(p.qty)}</td>`).join("")}<td class="sub">${fmt(bought)}</td><td></td></tr>`;
-  h += `<tr><td class="lbl">Проверка</td><td></td>${prods.map((p) => { const d = (colSum[p.sku] || 0) - (p.qty || 0); return `<td class="${d ? "bad-mark" : "ok-mark"}">${d ? (d > 0 ? "+" : "") + fmt(d) : "✓"}</td>`; }).join("")}<td class="${tot - bought ? "bad-mark" : "ok-mark"}">${tot - bought ? (tot - bought > 0 ? "+" : "") + fmt(tot - bought) : "✓"}</td><td></td></tr></tfoot>`;
-  $("#matrix").innerHTML = h;
-  $("#editedNote").classList.toggle("hidden", !Object.keys(D.edited).length);
-  renderSummary();
-}
-$("#matrix").addEventListener("change", (e) => {
-  const t = e.target; if (!t.dataset.c) return;
-  const k = t.dataset.c, s = t.dataset.s;
-  D.matrix[k] = D.matrix[k] || {}; D.matrix[k][s] = num(t.value);
-  const calc = ((PLAN?.calc || {})[k] || {})[s];
-  if (calc === num(t.value)) delete D.edited[k + "|" + s]; else D.edited[k + "|" + s] = 1;
-  saveDraft(); replan();
-});
-$("#matrix").addEventListener("keydown", (e) => {
-  if (e.key !== "Enter" || !e.target.dataset.c) return;
-  e.preventDefault();
-  const ins = $$("#matrix tbody input"); const i = ins.indexOf(e.target); const cols = D.products.filter((p) => p.sku).length;
-  (ins[i + cols] || ins[0]).focus(); (ins[i + cols] || ins[0]).select();
-});
-$("#recalc").onclick = () => { D.edited = {}; saveDraft(); replan(); };
 
 function renderGroups() {
   const g = PLAN?.groups || [];
@@ -390,11 +535,11 @@ $("#dropoffFind").onclick = () => searchDropoff($("#dropoffQ").value, $("#dropof
 $("#dropoffQ").onkeydown = (e) => { if (e.key === "Enter") $("#dropoffFind").click(); };
 
 function renderSummary() {
-  const n = D.cities.filter((c) => Object.values((D.matrix || {})[cityKey(c)] || {}).some((v) => v > 0)).length;
+  const n = D.rows.filter((r) => totalOf((PLAN?.matrix || {})[rowKey(r)]) > 0).length;
   const boxes = Object.values(PLAN?.boxes || {}).reduce((a, b) => a + b, 0);
   const units = D.products.reduce((a, p) => a + (p.qty || 0), 0);
   const min = D.multi ? 2 : Math.ceil(n * 0.55) * 2;
-  $("#summary").innerHTML = n ? `<div class="k"><b>${D.multi ? 1 : n}</b><span>${D.multi ? `заявка на ${n} городов` : "заявок"}</span></div><div class="k"><b>${fmt(boxes)}</b><span>коробок</span></div><div class="k"><b>${fmt(units)}</b><span>штук</span></div><div class="k"><b>~${min}–${min + 5} мин</b><span>займёт создание</span></div>`
+  $("#summary").innerHTML = n ? `<div class="k"><b>${D.multi ? 1 : n}</b><span>${D.multi ? `заявка на ${n} кластеров` : "заявок"}</span></div><div class="k"><b>${fmt(boxes)}</b><span>коробок</span></div><div class="k"><b>${fmt(units)}</b><span>штук</span></div><div class="k"><b>~${min}–${min + 5} мин</b><span>займёт создание</span></div>`
     : `<span class="muted">Добавьте товары, чтобы увидеть итог</span>`;
 }
 
@@ -404,20 +549,22 @@ $("#createBtn").onclick = async () => {
   if (!prods.length) errs.push("нет товаров");
   if (prods.some((p) => !/^\d+$/.test(p.sku))) errs.push("SKU должен состоять из цифр");
   if (prods.some((p) => p.lookupErr)) errs.push("есть товары, не найденные в магазине");
-  const used = D.cities.filter((c) => Object.values((D.matrix || {})[cityKey(c)] || {}).some((v) => v > 0));
-  if (used.some((c) => !c.cluster_id)) errs.push("не у всех городов выбран кластер Ozon");
+  const M = PLAN?.matrix || {};
+  const used = D.rows.filter((r) => totalOf(M[rowKey(r)]) > 0);
+  if (used.some((r) => !r.cluster_id)) errs.push("есть кластеры, не найденные в Озоне");
+  if (D.mode === "kits" && (D.kits.warn || []).length) errs.push("наборов больше, чем закуплено");
   if (!D.dropoff) errs.push("не выбрана точка отгрузки");
   if (D.tsmode === "auto" && !D.ts.d1) errs.push("не указан желаемый день поставки");
-  const keys = used.map(cityKey); if (new Set(keys).size !== keys.length) errs.push("один кластер выбран для двух городов");
+
   if (errs.length) return toast("Нельзя создать: " + errs.join("; "), true);
 
-  const sumCol = {}; for (const c of used) for (const [s, v] of Object.entries(D.matrix[cityKey(c)] || {})) sumCol[s] = (sumCol[s] || 0) + v;
+  const sumCol = {}; for (const r of used) for (const [s, v] of Object.entries(M[rowKey(r)] || {})) sumCol[s] = (sumCol[s] || 0) + v;
   const diff = prods.filter((p) => (sumCol[p.sku] || 0) !== (p.qty || 0));
   const boxes = Object.values(PLAN?.boxes || {}).reduce((a, b) => a + b, 0);
-  if (D.multi && used.length > 20) return toast("Одной заявкой Озон принимает не больше 20 городов", true);
-  const ok = await confirmBox(`<h3>${D.multi ? `Создать одну заявку на ${used.length} городов?` : `Создать ${used.length} заявок?`}</h3>
+  if (D.multi && used.length > 20) return toast("Одной заявкой Озон принимает не больше 20 кластеров", true);
+  const ok = await confirmBox(`<h3>${D.multi ? `Создать одну заявку на ${used.length} кластеров?` : `Создать ${used.length} заявок?`}</h3>
     <p>${fmt(boxes)} коробок через «${esc(D.dropoff.name)}».<br>
-    Таймслот: ${D.tsmode === "auto" ? `желаемо ${esc(dmy(D.ts.d1))} в ${esc(D.ts.t1 || "10:00")} — каждому городу ближайший свободный` : "выберете из доступных после создания черновиков"}.<br>
+    Таймслот: ${D.tsmode === "auto" ? `желаемо ${esc(dmy(D.ts.d1))} в ${esc(D.ts.t1 || "10:00")} — каждому кластеру ближайший свободный` : "выберете из доступных после создания черновиков"}.<br>
     ${D.passOn ? "Пропуск будет оформлен." : "Без пропуска."}</p>
     ${diff.length ? `<p class="warn-text">Распределено не столько, сколько закуплено: ${diff.map((p) => esc(prodLabel(p))).join(", ")}.</p>` : ""}
     ${APP.profile.demo ? '<p class="muted">Демо-режим: в настоящий Озон ничего не отправится.</p>' : ""}`, "Создать");
@@ -426,8 +573,10 @@ $("#createBtn").onclick = async () => {
   try {
     const body = {
       products: prods.map((p) => ({ sku: p.sku, qty: p.qty, name: p.name, short: prodLabel(p), box_size: p.box_size || null })),
-      cities: used.map((c) => ({ cluster_id: String(c.cluster_id), name: c.name, cluster_name: c.cluster_name })),
-      matrix: Object.fromEntries(used.map((c) => [String(c.cluster_id), D.matrix[cityKey(c)]])),
+      cities: used.map((r) => ({ cluster_id: String(r.cluster_id), name: rowName(r), cluster_name: rowName(r) })),
+      matrix: Object.fromEntries(used.map((r) => [String(r.cluster_id), M[rowKey(r)]])),
+      dist: D.mode === "kits" ? "kits" : "share",
+      kits: D.mode === "kits" ? { defs: D.kits.defs, alloc: D.kits.alloc } : null,
       mode: D.tsmode, slot_pref: { date: D.ts.d1, time: D.ts.t1 || "10:00" },
       dropoff: D.dropoff, pass: Object.assign({}, APP.profile.pass || {}, { enabled: D.passOn }), multi: !!D.multi,
       source: JSON.parse(JSON.stringify(D)),
@@ -582,23 +731,22 @@ async function showCancelResult(b) {
 }
 function recreate(b) {
   const src = b.source;
-  if (src && src.cities) {
-    D = Object.assign(newDraft(), JSON.parse(JSON.stringify(src)), { cv: 2 });
+  if (src && (src.rows || src.cities)) {
+    D = migrateDraft(Object.assign(newDraft(), JSON.parse(JSON.stringify(src)), { cv: 2 }));
   } else {                                   // партии из старых версий — собираем из поставок
     D = newDraft();
     D.products = b.products.map((p) => ({ sku: p.sku, qty: 0, name: p.name, short: p.short, box_size: p.box_size, multiple: !!(APP.profile.products[p.sku] || {}).multiple }));
-    D.cities = b.shipments.map((s) => ({ name: s.name, cluster_id: s.cluster_id, cluster_name: s.cluster_name, share: 0 }));
-    D.matrix = {}; D.edited = {};
+    D.rows = b.shipments.map((s) => ({ cluster_id: s.cluster_id, cluster_name: s.cluster_name || s.name, share: 0, fixed: {} }));
     for (const s of b.shipments) {
-      D.matrix[s.cluster_id] = {};
+      const r = D.rows.find((x) => x.cluster_id === s.cluster_id);
       for (const p of b.products) {
         const q = s.boxes.filter((x) => x.sku === p.sku).reduce((a, x) => a + x.qty, 0);
-        D.matrix[s.cluster_id][p.sku] = q; D.edited[s.cluster_id + "|" + p.sku] = 1;
-        D.products.find((x) => x.sku === p.sku).qty += q;
+        r.fixed[p.sku] = q; D.products.find((x) => x.sku === p.sku).qty += q;
       }
     }
     const tot = D.products.reduce((a, p) => a + p.qty, 0) || 1;
-    for (const c of D.cities) c.share = Math.round(Object.values(D.matrix[c.cluster_id]).reduce((a, v) => a + v, 0) / tot * 1000) / 10;
+    for (const r of D.rows) r.share = Math.round(totalOf(r.fixed) / tot * 1000) / 10;
+    if (b.kits) { D.mode = "kits"; D.kits = { defs: b.kits.defs, alloc: b.kits.alloc, manual: true }; }
     D.dropoff = b.dropoff || D.dropoff; D.multi = !!b.multi;
   }
   saveDraft(); closeBatch(); showTab("new"); renderNew();
@@ -659,7 +807,7 @@ $("#sSave").onclick = async () => {
     const part = { name: $("#sName").value.trim() || "Магазин", client_id: $("#sClient").value.trim(), demo: $("#sDemo").checked };
     if ($("#sKey").value.trim()) part.api_key = $("#sKey").value.trim();
     await saveProfile(part); await loadState(); renderSettings();
-    $("#sMsg").textContent = "Сохранено"; APP.clusters = null; loadClusters().then(() => D && renderCities()); resolveDropoffs();
+    $("#sMsg").textContent = "Сохранено"; APP.clusters = null; loadClusters().then(() => { if (D) { bindRows(); renderDistControls(); replan(); } }); resolveDropoffs();
   } catch (e) { toast(e.message, true); }
 };
 $("#sCheck").onclick = async () => {
@@ -785,22 +933,24 @@ $("#quitBtn").onclick = async () => {
 /* ================= старт ================= */
 async function init() {
   await loadState();
+  const fresh = !lsGet(draftKey());
   D = lsGet(draftKey()) || newDraft();
   if (D.ts && ("d2" in D.ts || "t2" in D.ts)) {        // старая форма с диапазоном
     D.ts = { d1: D.ts.d1, t1: D.ts.t1 || "10:00" }; D.tsmode = "auto"; saveDraft();
   }
   if (D.cv !== 2) {
-    for (const c of D.cities) { c.match = c.match || c.cluster_name || c.name; c.cluster_id = null; c.cluster_name = null; }
-    D.matrix = null; D.edited = {}; D.remCity = "largest"; D.cv = 2; saveDraft();
+    for (const c of D.cities || []) { c.match = c.match || c.cluster_name || c.name; c.cluster_id = null; c.cluster_name = null; }
+    D.matrix = null; D.edited = {}; D.remCity = "largest"; D.cv = 2;
   }
-  if (APP.profile.demo && !D.products.length && !lsGet(draftKey())) {
+  migrateDraft(D); saveDraft();
+  if (APP.profile.demo && !D.products.length && fresh) {
     D.products = [["1000000032", 300, "32 ГБ"], ["1000000064", 600, "64 ГБ"], ["1000000128", 1000, "128 ГБ"], ["1000000256", 600, "256 ГБ"], ["1000000512", 300, "512 ГБ"], ["1000001024", 300, "1 ТБ"]]
       .map(([sku, qty, short]) => ({ sku, qty, short }));
   }
   renderNew();
   await resolveDropoffs();
   await loadClusters();
-  renderCities(); replan();
+  bindRows(); renderDistControls(); replan();
   if (APP.profile.demo && D.products.some((p) => !p.name)) lookup(D.products.filter((p) => !p.name));
   const tab = lsGet("tab") || "new";
   showTab(tab === "batches" && !openBatch ? "batches" : tab);

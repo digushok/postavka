@@ -44,48 +44,57 @@
     </div>
 
     <div class="card">
-      <div class="card-h"><span class="step">2</span><div><h2>Города и доли</h2><p class="sub">Какой процент закупки уходит в каждый город</p></div>
+      <div class="card-h"><span class="step">2</span><div><h2>Распределение по кластерам</h2><p class="sub" id="distSub">Доли и количество — всё можно менять прямо в таблице</p></div>
         <div class="actions">
-          <select id="tplSel" class="pill-select" title="Шаблон городов"></select>
-          <button class="btn ghost" id="tplSave" title="Сохранить города и доли в выбранный шаблон">Сохранить</button>
+          <div class="seg" id="distSeg">
+            <label><input type="radio" name="dmode" value="share"><span>По долям</span></label>
+            <label><input type="radio" name="dmode" value="kits"><span>Наборами</span></label>
+          </div>
+          <select id="tplSel" class="pill-select" title="Шаблон кластеров и долей"></select>
+          <button class="btn ghost" id="tplSave" title="Сохранить кластеры и доли в выбранный шаблон">Сохранить</button>
           <button class="btn ghost" id="tplSaveAs">Сохранить как…</button>
-          <button class="btn soft" id="addCity">+ Город</button>
         </div>
       </div>
-      <div class="split">
-        <table class="grid" id="cityTable">
-          <thead><tr><th style="width:180px">Город</th><th>Кластер Ozon</th><th class="r" style="width:90px">Доля, %</th><th style="width:36px"></th></tr></thead>
-          <tbody></tbody>
-          <tfoot><tr><td colspan="2" class="r muted">Сумма долей</td><td class="r" id="shareSum"></td><td></td></tr></tfoot>
-        </table>
-        <div class="side panel">
-          <label class="fld">Остаток при округлении
-            <select id="method">
-              <option value="remainder_city">Весь остаток в один город</option>
-              <option value="fair">Справедливо (по наибольшему остатку)</option>
-              <option value="floor">Округлить вниз (остаток не отправлять)</option>
-            </select></label>
-          <label class="fld" id="remCityWrap">Город для остатка
-            <select id="remCity"></select></label>
-          <div class="muted small" id="clusterNote"></div>
+      <div class="opts">
+        <label class="inl" id="methodWrap">Остаток при округлении
+          <select id="method">
+            <option value="remainder_city">весь в один кластер</option>
+            <option value="fair">справедливо (по наибольшему остатку)</option>
+            <option value="floor">округлить вниз (не отправлять)</option>
+          </select></label>
+        <label class="inl" id="remCityWrap"><span id="remCityLbl">Кластер для остатка</span> <select id="remCity"></select></label>
+        <span id="editedNote" class="chip warn hidden">есть ручные правки</span>
+        <button class="btn ghost sm" id="recalc">↺ Пересчитать всё по долям</button>
+        <span class="muted small" id="clusterNote"></span>
+      </div>
+      <div class="scroll"><table class="grid matrix" id="dist"></table></div>
+      <div class="row">
+        <select id="addCluster" class="pill-select"></select>
+        <button class="btn soft sm" id="addClusterBtn">+ Кластер</button>
+        <button class="btn ghost sm hidden" id="restBtn">Остаток → в кластер для остатка</button>
+      </div>
+      <div id="distWarn"></div>
+
+      <div id="kitsBlock" class="kits hidden">
+        <div class="card-h"><div><h2>Наборы</h2><p class="sub">Набор — грузоместа по одному на каждый SKU. Одинаковые наборы дают одинаковые коробки и общий файл этикеток.</p></div>
+          <div class="actions">
+            <span id="kitsManual" class="chip warn hidden">наборы правились вручную</span>
+            <button class="btn soft sm" id="kitsAuto">Подобрать по долям</button>
+            <button class="btn ghost sm" id="kitAdd">+ Набор</button>
+          </div>
         </div>
+        <div class="scroll"><table class="grid matrix" id="kitsTable"></table></div>
+        <div class="muted small" id="kitsNote"></div>
       </div>
     </div>
 
     <div class="card">
-      <div class="card-h"><span class="step">3</span><div><h2>Распределение по городам</h2><p class="sub">Любую цифру можно поправить вручную</p></div>
-        <div class="actions"><span id="editedNote" class="chip warn hidden">есть ручные правки</span><button class="btn ghost" id="recalc">↺ Пересчитать по долям</button></div>
-      </div>
-      <div class="scroll"><table class="grid matrix" id="matrix"></table></div>
-    </div>
-
-    <div class="card">
-      <div class="card-h"><span class="step">4</span><div><h2>Грузоместа</h2><p class="sub" id="boxTotal">Одинаковые коробки — один файл этикеток</p></div></div>
+      <div class="card-h"><span class="step">3</span><div><h2>Грузоместа</h2><p class="sub" id="boxTotal">Одинаковые коробки — один файл этикеток</p></div></div>
       <div id="groupList" class="groups"></div>
     </div>
 
     <div class="card">
-      <div class="card-h"><span class="step">5</span><div><h2>Отгрузка</h2><p class="sub">Как оформить заявки, точка, таймслот и пропуск</p></div></div>
+      <div class="card-h"><span class="step">4</span><div><h2>Отгрузка</h2><p class="sub">Как оформить заявки, точка, таймслот и пропуск</p></div></div>
       <div class="modes" id="modeSeg">
         <label><input type="radio" name="multi" value="0"><span><b>Отдельно на каждый город</b><em>Своя заявка на каждый город. Слоты обычно ближе.</em></span></label>
         <label><input type="radio" name="multi" value="1"><span><b>Одна заявка на все города</b><em>Как «отгрузить в общей точке»: один таймслот, один пропуск, один номер заявки. Слоты обычно позже.</em></span></label>

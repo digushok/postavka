@@ -80,6 +80,25 @@ def write_packing(batch, path):
         units = sum(b["qty"] for b in s.get("boxes", []))
         city_rows.append(f"<tr><td>{e(s['name'])}</td><td>{e(str(s.get('order_number') or s.get('order_id') or '—'))}</td>"
                          f"<td class=r>{nb}</td><td class=r>{units}</td><td class=chk></td></tr>")
+    kits_html = ""
+    kits = batch.get("kits")
+    if kits and kits.get("defs"):
+        prods = batch.get("products") or []
+        pname = {p["sku"]: (p.get("short") or p.get("name") or p["sku"]) for p in prods}
+        head = "".join(f"<th class=r>{e(pname.get(p['sku'], p['sku']))}</th>" for p in prods)
+        krows = []
+        for d in kits["defs"]:
+            n = sum(int((a or {}).get(d["id"]) or 0) for a in kits["alloc"].values())
+            cells = "".join(f"<td class=r>{int(d['items'].get(p['sku']) or 0)}</td>" for p in prods)
+            krows.append(f"<tr><td><b>Набор {e(d['id'])}</b></td>{cells}<td class=r><b>{n}</b></td></tr>")
+        names = {s["cluster_id"]: s["name"] for s in ships}
+        crows = []
+        for cid, a in kits["alloc"].items():
+            if cid in names and any(int(v or 0) for v in (a or {}).values()):
+                txt = " + ".join(f"{int(v)} × {e(k)}" for k, v in (a or {}).items() if int(v or 0))
+                crows.append(f"<tr><td>{e(names[cid])}</td><td>{txt}</td><td class=chk></td></tr>")
+        kits_html = (f"<h2>Наборы</h2><table><tr><th>Набор</th>{head}<th class=r>Наборов</th></tr>{''.join(krows)}</table>"
+                     f"<table><tr><th>Кластер</th><th>Наборы</th><th>✓</th></tr>{''.join(crows)}</table>")
     slot = batch.get("chosen_slot_human") or ""
     doc = f"""<!doctype html><html lang=ru><meta charset=utf-8><title>Лист сборки {e(batch['id'])}</title>
 <style>body{{font:13px/1.4 system-ui,Segoe UI,Arial;margin:24px;color:#111}}h1{{font-size:18px;margin:0 0 4px}}
@@ -89,6 +108,7 @@ td,th{{border:1px solid #bbb;padding:6px 8px;text-align:left;vertical-align:top}
 @media print{{body{{margin:8mm}}}}</style>
 <h1>Лист сборки — партия {e(batch['id'])}</h1>
 <div class=m>Точка отгрузки: {e((batch.get('dropoff') or {}).get('name') or '—')} · Таймслот: {e(slot)}</div>
+{kits_html}
 <h2>Коробки по составу</h2>
 <table><tr><th>№</th><th>Товар</th><th class=r>В коробке</th><th class=r>Коробок</th><th>Города</th><th>✓</th></tr>
 {''.join(rows)}</table>
