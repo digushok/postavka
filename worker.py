@@ -211,11 +211,14 @@ class Run:
         s["storage_wh"] = _best_warehouse(cl)
         if rejected:
             self.apply_rejected(s, rejected)
-        s["slots"] = self.fetch_slots(draft_id, "CROSSDOCK", [s])
+        if self.no_slot_mode():
+            s["slots"] = []
+        else:
+            s["slots"] = self.fetch_slots(draft_id, "CROSSDOCK", [s])
         s["slots_at"] = time.time()
         self.set(s, "draft_ok")
-        self.log(f"Черновик {draft_id} — кластер «{s.get('ozon_cluster_name') or s['cluster_id']}», "
-                 f"{len(s['slots'])} таймслотов", s)
+        self.log(f"Черновик {draft_id} — кластер «{s.get('ozon_cluster_name') or s['cluster_id']}»"
+                 + ("" if self.no_slot_mode() else f", {len(s['slots'])} таймслотов"), s)
 
     def poll_draft(self, draft_id):
         return self.api.poll("/v2/draft/create/info", {"draft_id": draft_id},
@@ -344,6 +347,13 @@ class Run:
         self.save()
         self.log(f"Заявка создана, id {order_id}, таймслот {S.human(slot)}", s)
 
+    def no_slot_mode(self):
+        """Режим «Без таймслота»: заявки сразу без слота, слоты у Озона даже не запрашиваются."""
+        return self.batch.get("mode") == "none"
+
+    def supply_fn(self):
+        return self.create_supply_noslot if self.no_slot_mode() else self.create_supply
+
     def slot_summary(self):
         act = self.active()
         txt = S.summary([x.get("slot") for x in act if x.get("slot")])
@@ -361,6 +371,8 @@ class Run:
         try:
             order_id = self.submit_supply(s["draft_id"], "CROSSDOCK", [s], None)
         except OzonError as e:
+            if self.no_slot_mode():
+                raise OzonError(f"Заявку без таймслота Озон не принял: {e}")
             raise OzonError(f"{self.no_slots_text()}. Заявку без таймслота Озон тоже не принял: {e}")
         s["order_id"] = order_id
         s["slot"] = None
@@ -476,9 +488,9 @@ class Run:
             self.failed_now.discard(skey(s))
             self.save()
             multi_pending = self.batch.get("multi") and not (self.batch.get("order") or {}).get("order_id")
-            ready = self.batch.get("chosen_slot") or (self.batch.get("mode") == "auto" and not self.batch.get("multi"))
+            ready = self.batch.get("chosen_slot") or (self.batch.get("mode") in ("auto", "none") and not self.batch.get("multi"))
             if ready and not multi_pending:
-                self.safe(s, self.create_supply)
+                self.safe(s, self.supply_fn())
                 if s.get("order_id"):
                     self.pipe_add(s)
                     started = True
@@ -902,7 +914,7 @@ class Run:
             return self.run_multi()
         ships = self.active()
 
-        auto = b.get("mode") == "auto"
+        auto = b.get("mode") in ("auto", "none")
         # 1. Черновики — только для ручного выбора: нужен список слотов всех городов сразу.
         #    В автоматическом режиме каждый город проходит путь целиком (черновик → слоты → бронь),
         #    и только потом следующий: пока создаются чужие черновики, ближние слоты не успевают уйти.
@@ -936,7 +948,10 @@ class Run:
             if auto and not self.draft_alive(s):
                 self.idle_until("/v1/draft/crossdock/create")
             self.idle_until("/v2/draft/supply/create")     # пока ждём лимит — двигаем конвейер
-            self.safe(s, self.create_supply, later)
+            if self.no_slot_mode():
+                self.safe(s, self.create_supply_noslot)
+            else:
+                self.safe(s, self.create_supply, later)
             if s.get("order_id"):
                 self.pipe_add(s)
         self.retry_no_slots(later)
@@ -1019,7 +1034,7 @@ class Run:
                     if self.stop.is_set():
                         raise
                     return self.fail(str(e))
-                if not b.get("chosen_slot"):
+                if not b.get("chosen_slot") and not self.no_slot_mode():
                     if not self.pick_slot([M["slots"]], M["draft_at"]):
                         return
             elif time.time() - M.get("slots_at", 0) > 90:
@@ -1033,6 +1048,16 @@ class Run:
             for s in live:
                 self.set(s, "supply")
             for attempt in range(4):
+                if self.no_slot_mode():
+                    slot = None
+                    try:
+                        M["order_id"] = self.submit_supply(M["draft_id"], "MULTI_CLUSTER", live, None)
+                    except OzonError as e:
+                        msg = f"Заявку без таймслота Озон не принял: {e}"
+                        for s in live:
+                            self.set(s, "error", msg)
+                        return self.fail(msg)
+                    break
                 avail = [x for x in M["slots"] if S.key(x) not in {S.key(t) for t in tried}]
                 slot = (S.choose_for_city(avail, b["slot_pref"]) if b.get("mode") == "auto" else self.take_slot(avail, M))
                 if not slot:
@@ -1056,7 +1081,13 @@ class Run:
             for s in live:
                 s["order_id"] = M["order_id"]
                 s["slot"] = slot
-            self.log(f"Заявка создана, id {M['order_id']}, {len(live)} городов, таймслот {S.human(slot)}")
+                s["no_slot"] = not slot
+            if slot:
+                self.log(f"Заявка создана, id {M['order_id']}, {len(live)} городов, таймслот {S.human(slot)}")
+            else:
+                b["chosen_slot_human"] = "без таймслота"
+                self.log(f"Заявка создана, id {M['order_id']}, {len(live)} городов, без таймслота — "
+                         f"выберите таймслот в кабинете Озона", lvl="warn")
 
         live = [s for s in ships if s.get("order_id")]
         if any(not s.get("supply_id") for s in live):

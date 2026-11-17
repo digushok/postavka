@@ -203,7 +203,7 @@ class MockOzon:
         if len(b["selected_cluster_warehouses"]) != len(d["clusters"]):
             return {"error_reasons": ["INVALID_CLUSTERS_COUNT"]}
         # каждый третий черновик: выбранный слот «успели занять» с первой попытки
-        if b["draft_id"] % 3 == 0 and not d.get("slot_taken_once"):
+        if b.get("timeslot") and b["draft_id"] % 3 == 0 and not d.get("slot_taken_once"):
             d["slot_taken_once"] = True
             return {"draft_id": b["draft_id"], "error_reasons": ["TIMESLOT_NOT_AVAILABLE"]}
         oid = self._id()

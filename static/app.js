@@ -512,7 +512,8 @@ function renderShipping() {
   if (!D.ts.d1 || D.ts.d1 < ymd(new Date())) D.ts.d1 = addDays((APP.profile.timeslot || {}).days_from ?? 2);
   $("#tsD1").value = D.ts.d1; $("#tsT1").value = D.ts.t1 || "10:00";
   $("#tsAuto").classList.toggle("hidden", D.tsmode !== "auto");
-  $("#tsManualHint").classList.toggle("hidden", D.tsmode === "auto");
+  $("#tsManualHint").classList.toggle("hidden", D.tsmode !== "manual");
+  $("#tsNoneHint").classList.toggle("hidden", D.tsmode !== "none");
   const ps = APP.profile.pass || {};
   $("#passOn").checked = D.passOn;
   $("#passInfo").textContent = ps.driver_name ? `${ps.driver_name}, ${ps.driver_phone || ""}, ${ps.vehicle_model || ""} ${ps.vehicle_number || ""}` : "Данные водителя не заполнены — укажите их в настройках.";
@@ -564,7 +565,7 @@ $("#createBtn").onclick = async () => {
   if (D.multi && used.length > 20) return toast("Одной заявкой Озон принимает не больше 20 кластеров", true);
   const ok = await confirmBox(`<h3>${D.multi ? `Создать одну заявку на ${used.length} кластеров?` : `Создать ${used.length} заявок?`}</h3>
     <p>${fmt(boxes)} коробок через «${esc(D.dropoff.name)}».<br>
-    Таймслот: ${D.tsmode === "auto" ? `желаемо ${esc(dmy(D.ts.d1))} в ${esc(D.ts.t1 || "10:00")} — каждому кластеру ближайший свободный` : "выберете из доступных после создания черновиков"}.<br>
+    Таймслот: ${D.tsmode === "auto" ? `желаемо ${esc(dmy(D.ts.d1))} в ${esc(D.ts.t1 || "10:00")} — каждому кластеру ближайший свободный` : D.tsmode === "none" ? "без таймслота — выберете потом в кабинете Озона" : "выберете из доступных после создания черновиков"}.<br>
     ${D.passOn ? "Пропуск будет оформлен." : "Без пропуска."}</p>
     ${diff.length ? `<p class="warn-text">Распределено не столько, сколько закуплено: ${diff.map((p) => esc(prodLabel(p))).join(", ")}.</p>` : ""}
     ${APP.profile.demo ? '<p class="muted">Демо-режим: в настоящий Озон ничего не отправится.</p>' : ""}`, "Создать");
@@ -631,7 +632,7 @@ function renderBatch(b) {
   const done = active.filter((s) => s.status === "done").length;
   const pct = active.length ? Math.round(done / active.length * 100) : 0;
   const pref = b.slot_pref || {};
-  const slotText = b.chosen_slot_human || (b.mode === "auto" ? `желаемо ${dmy(pref.date || pref.date_from)} ${pref.time || pref.time_from || ""}` : "выбор из списка");
+  const slotText = b.chosen_slot_human || (b.mode === "auto" ? `желаемо ${dmy(pref.date || pref.date_from)} ${pref.time || pref.time_from || ""}` : b.mode === "none" ? "без таймслота" : "выбор из списка");
   let h = `<a class="back" id="backList">← Все партии</a>
     <div class="card"><div class="bhead"><h2>Партия от ${esc(b.created)}</h2>${busy && b.phase !== "cancelling" ? '<span class="chip run">выполняется</span>' : tag(PHASE, b.phase)}${b.demo ? '<span class="chip plain">демо</span>' : ""}
     <div class="actions">
