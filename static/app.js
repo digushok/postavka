@@ -528,7 +528,7 @@ async function searchDropoff(q, resEl, onPick) {
   resEl.innerHTML = `<div class="muted">Ищу…</div>`;
   try {
     const r = await api("/api/dropoff", { q });
-    resEl.innerHTML = r.items.length ? r.items.map((x, i) => `<div class="it" data-i="${i}">${esc(x.name)}<div class="muted">${esc(x.address || "")} · ${esc((x.warehouse_type || "").replace("WAREHOUSE_TYPE_", ""))}</div></div>`).join("") : `<div class="muted">Ничего не найдено. Пункты выдачи (ПВЗ) Озон ищет по адресу — введите адрес пункта, например «Москва, Тверская 7».</div>`;
+    resEl.innerHTML = r.items.length ? r.items.map((x, i) => `<div class="it" data-i="${i}">${esc(x.name)}<div class="muted">${esc(x.address || "")} · ${esc((x.warehouse_type || "").replace("WAREHOUSE_TYPE_", ""))}</div></div>`).join("") : `<div class="muted">Ничего не найдено. Пункт выдачи (ПВЗ) Озон находит только по полному названию, как в кабинете, например «МОСКВА_10704». По адресу ПВЗ не ищутся.</div>`;
     $$(".it", resEl).forEach((el) => (el.onclick = () => onPick(r.items[+el.dataset.i])));
   } catch (e) { resEl.innerHTML = `<div class="err-text">${esc(e.message)}</div>`; }
 }

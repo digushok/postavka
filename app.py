@@ -214,11 +214,12 @@ def api_clusters(_):
 
 
 def _search_variants(q):
-    """«МОСКВА_10704» → «МОСКВА_10704», «МОСКВА 10704», «10704»: Озон ищет точки не по точному названию."""
+    """Варианты запроса точки отгрузки. ПВЗ Озон находит только по полному названию в точности как у него
+    («МОСКВА_10704» — заглавными, через «_»), поэтому пробуем и заглавными, и с «_» вместо пробела."""
     q = " ".join((q or "").split())
-    out = [q]
-    if "_" in q:
-        out.append(" ".join(q.replace("_", " ").split()))
+    out = []
+    for v in (q, q.upper()):
+        out += [v, v.replace(" ", "_"), v.replace("_", " ")]
     out += re.findall(r"\d{4,}", q)
     return [v for i, v in enumerate(out) if v and v not in out[:i]]
 
