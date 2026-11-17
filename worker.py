@@ -24,7 +24,7 @@ from ozon_api import OzonClient, OzonError
 
 DRAFT_TTL = 27 * 60          # черновик живёт 30 минут — пересоздаём заранее
 RETRY_NO_SLOTS = 60          # как часто повторно спрашивать слоты у города, где их не было
-WAIT_NO_SLOTS = 15 * 60      # сколько всего ждать появления слотов (слоты на точке появляются волнами)
+WAIT_NO_SLOTS = 5 * 60       # сколько ещё ждать слотов после всех черновиков; потом — заявка без таймслота
 RUNNING = {}                 # batch_id -> (thread, stop_event)
 _save_lock = threading.Lock()
 
@@ -340,14 +340,42 @@ class Run:
         if auto:
             if not self.batch.get("chosen_slot"):
                 self.batch["chosen_slot"] = slot      # нужен заменам кластеров во время работы
-            self.batch["chosen_slot_human"] = S.summary([x.get("slot") for x in self.active()])
+            self.batch["chosen_slot_human"] = self.slot_summary()
         self.save()
         self.log(f"Заявка создана, id {order_id}, таймслот {S.human(slot)}", s)
 
+    def slot_summary(self):
+        act = self.active()
+        txt = S.summary([x.get("slot") for x in act if x.get("slot")])
+        n = sum(1 for x in act if x.get("no_slot") and x.get("order_id"))
+        if n:
+            txt = (txt + " · " if txt else "") + f"без таймслота — {n}"
+        return txt
+
+    def create_supply_noslot(self, s):
+        """Заявка без таймслота (как «Создать без таймслота» в кабинете) — слот выбирается потом в кабинете."""
+        self.check_stop()
+        if not self.draft_alive(s):
+            self.create_draft(s)
+        self.set(s, "supply")
+        try:
+            order_id = self.submit_supply(s["draft_id"], "CROSSDOCK", [s], None)
+        except OzonError as e:
+            raise OzonError(f"{self.no_slots_text()}. Заявку без таймслота Озон тоже не принял: {e}")
+        s["order_id"] = order_id
+        s["slot"] = None
+        s["no_slot"] = True
+        msg = "Заявка создана без таймслота — выберите таймслот в кабинете Озона"
+        s.setdefault("warn", []).append(msg)
+        self.batch["chosen_slot_human"] = self.slot_summary()
+        self.save()
+        self.log(f"Заявка создана, id {order_id}, без таймслота — выберите таймслот в кабинете Озона", s, "warn")
+
     def submit_supply(self, draft_id, supply_type, ships, slot):
         body = {"draft_id": draft_id, "selected_cluster_warehouses": self.cluster_wh(ships),
-                "supply_type": supply_type,
-                "timeslot": {"from_in_timezone": slot[0], "to_in_timezone": slot[1]}}
+                "supply_type": supply_type}
+        if slot:                         # без слота — заявка «без таймслота», слот выбирается в кабинете
+            body["timeslot"] = {"from_in_timezone": slot[0], "to_in_timezone": slot[1]}
         r = self.api.post("/v2/draft/supply/create", body)
         errs = [e for e in (r.get("error_reasons") or []) if e not in ("UNSPECIFIED",)]
         if errs:
@@ -1141,7 +1169,8 @@ class Run:
             return
         deadline = time.time() + WAIT_NO_SLOTS
         self.log(f"Без таймслотов: {len(later)} из {len(self.active())}. Жду, пока у точки появятся места, — "
-                 f"спрашиваю Озон раз в минуту, до {WAIT_NO_SLOTS // 60} мин", lvl="warn")
+                 f"спрашиваю Озон раз в минуту, до {WAIT_NO_SLOTS // 60} мин; не появятся — создам заявки "
+                 f"без таймслота", lvl="warn")
         pending = list(later)
         while pending:
             pending = [s for s in pending if not s.get("cancelled") and not s.get("order_id")]
@@ -1153,14 +1182,20 @@ class Run:
                 self.pipe_tick()
                 self.api.sleep(min(2.0, max(0.1, s["no_slots_at"] + RETRY_NO_SLOTS - time.time())))
             s["slots_at"] = 0                # слоты запросим заново
-            again = [] if time.time() < deadline else None
+            if time.time() >= deadline:      # слоты так и не появились — заявка без таймслота
+                pending.remove(s)
+                self.safe(s, self.create_supply_noslot)
+                if s.get("order_id"):
+                    self.pipe_add(s)
+                continue
+            again = []
             self.safe(s, self.create_supply, again, quiet=True)
             if s.get("order_id"):
                 self.pipe_add(s)
                 for x in pending:            # места появились — остальных спрашиваем сразу
                     x["no_slots_at"] = 0
             elif not again:
-                pending.remove(s)            # ошибка (или время вышло) — город больше не ждём
+                pending.remove(s)            # ошибка — город больше не ждём
 
     def safe(self, s, fn, later=None, quiet=False):
         try:
