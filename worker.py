@@ -23,7 +23,8 @@ import storage as ST
 from ozon_api import OzonClient, OzonError
 
 DRAFT_TTL = 27 * 60          # черновик живёт 30 минут — пересоздаём заранее
-RETRY_NO_SLOTS = 120         # через сколько секунд повторно спросить слоты у города, где их не было
+RETRY_NO_SLOTS = 60          # как часто повторно спрашивать слоты у города, где их не было
+WAIT_NO_SLOTS = 15 * 60      # сколько всего ждать появления слотов (слоты на точке появляются волнами)
 RUNNING = {}                 # batch_id -> (thread, stop_event)
 _save_lock = threading.Lock()
 
@@ -902,24 +903,15 @@ class Run:
         for s in ships:
             if s.get("order_id") or skey(s) in self.failed_now or s["status"] == "done":
                 continue
+            if later:
+                self.retry_due(later)        # пока идут черновики — проверяем, не появились ли места
             if auto and not self.draft_alive(s):
                 self.idle_until("/v1/draft/crossdock/create")
             self.idle_until("/v2/draft/supply/create")     # пока ждём лимит — двигаем конвейер
             self.safe(s, self.create_supply, later)
             if s.get("order_id"):
                 self.pipe_add(s)
-        for s in later:
-            if s.get("cancelled") or s.get("order_id"):
-                continue
-            while time.time() < s["no_slots_at"] + RETRY_NO_SLOTS:   # ждём, двигая конвейер
-                self.check_stop()
-                self.pipe_tick()
-                self.api.sleep(min(2.0, max(0.1, s["no_slots_at"] + RETRY_NO_SLOTS - time.time())))
-            s["slots_at"] = 0                # слоты запросим заново
-            self.log("Повторно запрашиваю таймслоты", s)
-            self.safe(s, self.create_supply)
-            if s.get("order_id"):
-                self.pipe_add(s)
+        self.retry_no_slots(later)
 
         self.take_replacements()
 
@@ -1126,7 +1118,51 @@ class Run:
         self.log(f"Черновик {draft_id} на {len(ships)} кластеров: {len(M['slots'])} таймслотов")
 
     # --------------------------------------------------------- обёртки
-    def safe(self, s, fn, later=None):
+    def retry_due(self, later):
+        """Повторный запрос слотов у отложенных городов, чья минута уже прошла (без ожидания)."""
+        for s in list(later):
+            if s.get("cancelled") or s.get("order_id") or skey(s) in self.failed_now:
+                later.remove(s)
+                continue
+            if time.time() < s["no_slots_at"] + RETRY_NO_SLOTS:
+                continue
+            later.remove(s)
+            s["slots_at"] = 0
+            self.safe(s, self.create_supply, later, quiet=True)
+            if s.get("order_id"):
+                self.pipe_add(s)
+                for x in later:              # места появились — остальных спрашиваем сразу
+                    x["no_slots_at"] = 0
+
+    def retry_no_slots(self, later):
+        """Города без слотов: спрашиваем раз в минуту, пока слоты не появятся (до WAIT_NO_SLOTS).
+        Как только слоты получил хоть один город — остальных спрашиваем сразу."""
+        if not later:
+            return
+        deadline = time.time() + WAIT_NO_SLOTS
+        self.log(f"Без таймслотов: {len(later)} из {len(self.active())}. Жду, пока у точки появятся места, — "
+                 f"спрашиваю Озон раз в минуту, до {WAIT_NO_SLOTS // 60} мин", lvl="warn")
+        pending = list(later)
+        while pending:
+            pending = [s for s in pending if not s.get("cancelled") and not s.get("order_id")]
+            if not pending:
+                break
+            s = min(pending, key=lambda x: x["no_slots_at"])
+            while time.time() < s["no_slots_at"] + RETRY_NO_SLOTS:   # ждём, двигая конвейер
+                self.check_stop()
+                self.pipe_tick()
+                self.api.sleep(min(2.0, max(0.1, s["no_slots_at"] + RETRY_NO_SLOTS - time.time())))
+            s["slots_at"] = 0                # слоты запросим заново
+            again = [] if time.time() < deadline else None
+            self.safe(s, self.create_supply, again, quiet=True)
+            if s.get("order_id"):
+                self.pipe_add(s)
+                for x in pending:            # места появились — остальных спрашиваем сразу
+                    x["no_slots_at"] = 0
+            elif not again:
+                pending.remove(s)            # ошибка (или время вышло) — город больше не ждём
+
+    def safe(self, s, fn, later=None, quiet=False):
         try:
             fn(s)
         except NoSlots as e:
@@ -1137,8 +1173,9 @@ class Run:
                 return
             s["no_slots_at"] = time.time()
             later.append(s)
-            self.set(s, "draft_ok", "нет таймслотов — повторю позже")
-            self.log(str(e) + f". Повторю через {RETRY_NO_SLOTS // 60} мин, после остальных городов", s, "warn")
+            self.set(s, "draft_ok", "нет таймслотов — жду, пока появятся")
+            if not quiet:
+                self.log(str(e) + ". Повторю позже, после остальных городов", s, "warn")
         except OzonError as e:
             if self.stop.is_set():
                 self.set(s, s["status"], "остановлено")
