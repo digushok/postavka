@@ -23,6 +23,7 @@ import storage as ST
 from ozon_api import OzonClient, OzonError
 
 DRAFT_TTL = 27 * 60          # черновик живёт 30 минут — пересоздаём заранее
+RETRY_NO_SLOTS = 120         # через сколько секунд повторно спросить слоты у города, где их не было
 RUNNING = {}                 # batch_id -> (thread, stop_event)
 _save_lock = threading.Lock()
 
@@ -102,6 +103,10 @@ def same_cluster(expected, got):
     if not a or not b:
         return True          # сравнить не с чем
     return a == b or a in b or b in a
+
+
+class NoSlots(OzonError):
+    """Озон вернул пустой список таймслотов — у точки отгрузки нет мест (бывает временно)."""
 
 
 class Run:
@@ -241,6 +246,9 @@ class Run:
             self.batch["use_storage"] = True     # второй вариант — с явным складом размещения
             body["selected_cluster_warehouses"] = self.cluster_wh(ships)
             r = self.api.post("/v2/draft/timeslot/info", body)
+            err = r.get("error_reason")
+            if err and err not in ("UNSPECIFIED",):
+                raise OzonError(f"таймслоты: {REASONS.get(err, err)}")
         t = (r.get("result") or {}).get("drop_off_warehouse_timeslots") or {}
         out = []
         for d in t.get("days") or []:
@@ -256,6 +264,13 @@ class Run:
                 pass
         return sorted(out, key=lambda x: S.parse(x[0]))
 
+    def no_slots_text(self):
+        d = self.batch.get("dropoff") or {}
+        where = f"на точке отгрузки «{d['name']}»" if d.get("name") else "на точке отгрузки"
+        today = date.today()
+        return (f"Озон не даёт свободных таймслотов {where} с {today:%d.%m} по {today + timedelta(days=27):%d.%m} — "
+                f"у точки нет мест на этот объём")
+
     def draft_alive(self, holder):
         return holder.get("draft_id") and time.time() - holder.get("draft_at", 0) < DRAFT_TTL
 
@@ -268,7 +283,7 @@ class Run:
             return want
         slot = S.nearest_to(available, want)
         if not slot:
-            raise OzonError("Нет доступных таймслотов")
+            raise NoSlots(self.no_slots_text())
         msg = f"Таймслот {S.human(want)} недоступен — взят ближайший {S.human(slot)}"
         if who:
             who.setdefault("warn", []).append(msg)
@@ -283,7 +298,7 @@ class Run:
         tried = {S.key(x) for x in s.get("tried_slots") or []}
         slot = S.choose_for_city([x for x in s["slots"] if S.key(x) not in tried], pref, cov)
         if not slot:
-            raise OzonError("Нет свободных таймслотов")
+            raise NoSlots(self.no_slots_text())
         if S.day_shift(slot, pref) != 0:
             msg = f"В желаемый день свободных слотов нет — взят ближайший {S.human(slot)}"
             s.setdefault("warn", []).append(msg)
@@ -293,7 +308,8 @@ class Run:
     def create_supply(self, s):
         self.check_stop()
         if not self.draft_alive(s):
-            self.log("Черновик устарел — создаю заново", s)
+            if s.get("draft_id"):
+                self.log("Черновик устарел — создаю заново", s)
             self.create_draft(s)
         elif time.time() - s.get("slots_at", 0) > 90:
             s["slots"] = self.fetch_slots(s["draft_id"], "CROSSDOCK", [s])
@@ -321,6 +337,8 @@ class Run:
         s["order_id"] = order_id
         s["slot"] = slot
         if auto:
+            if not self.batch.get("chosen_slot"):
+                self.batch["chosen_slot"] = slot      # нужен заменам кластеров во время работы
             self.batch["chosen_slot_human"] = S.summary([x.get("slot") for x in self.active()])
         self.save()
         self.log(f"Заявка создана, id {order_id}, таймслот {S.human(slot)}", s)
@@ -429,7 +447,8 @@ class Run:
             self.failed_now.discard(skey(s))
             self.save()
             multi_pending = self.batch.get("multi") and not (self.batch.get("order") or {}).get("order_id")
-            if self.batch.get("chosen_slot") and not multi_pending:
+            ready = self.batch.get("chosen_slot") or (self.batch.get("mode") == "auto" and not self.batch.get("multi"))
+            if ready and not multi_pending:
                 self.safe(s, self.create_supply)
                 if s.get("order_id"):
                     self.pipe_add(s)
@@ -854,8 +873,11 @@ class Run:
             return self.run_multi()
         ships = self.active()
 
-        # 1. Черновики
-        if not b.get("chosen_slot"):
+        auto = b.get("mode") == "auto"
+        # 1. Черновики — только для ручного выбора: нужен список слотов всех городов сразу.
+        #    В автоматическом режиме каждый город проходит путь целиком (черновик → слоты → бронь),
+        #    и только потом следующий: пока создаются чужие черновики, ближние слоты не успевают уйти.
+        if not b.get("chosen_slot") and not auto:
             b["phase"] = "drafts"
             self.save()
             for s in ships:
@@ -876,10 +898,25 @@ class Run:
         for s in ships:                      # уже созданные (при «Продолжить») — сразу в конвейер
             if s.get("order_id"):
                 self.pipe_add(s)
+        later = []                           # города без слотов — спросим ещё раз в конце
         for s in ships:
             if s.get("order_id") or skey(s) in self.failed_now or s["status"] == "done":
                 continue
+            if auto and not self.draft_alive(s):
+                self.idle_until("/v1/draft/crossdock/create")
             self.idle_until("/v2/draft/supply/create")     # пока ждём лимит — двигаем конвейер
+            self.safe(s, self.create_supply, later)
+            if s.get("order_id"):
+                self.pipe_add(s)
+        for s in later:
+            if s.get("cancelled") or s.get("order_id"):
+                continue
+            while time.time() < s["no_slots_at"] + RETRY_NO_SLOTS:   # ждём, двигая конвейер
+                self.check_stop()
+                self.pipe_tick()
+                self.api.sleep(min(2.0, max(0.1, s["no_slots_at"] + RETRY_NO_SLOTS - time.time())))
+            s["slots_at"] = 0                # слоты запросим заново
+            self.log("Повторно запрашиваю таймслоты", s)
             self.safe(s, self.create_supply)
             if s.get("order_id"):
                 self.pipe_add(s)
@@ -902,7 +939,7 @@ class Run:
             cov = {S.key(sl): n for sl, n in S.slot_counts(slot_lists)}
             plan = [S.choose_for_city(l, pref, cov) for l in slot_lists]
             if not any(plan):
-                self.fail("У Озона нет свободных таймслотов")
+                self.fail(self.no_slots_text())
                 return False
             # для общей заявки слот один; для отдельных — запоминаем самый частый для отображения
             b["chosen_slot"] = max((p for p in plan if p), key=lambda p: (sum(1 for q in plan if q == p), -S.parse(p[0]).timestamp()))
@@ -979,7 +1016,9 @@ class Run:
                 avail = [x for x in M["slots"] if S.key(x) not in {S.key(t) for t in tried}]
                 slot = (S.choose_for_city(avail, b["slot_pref"]) if b.get("mode") == "auto" else self.take_slot(avail, M))
                 if not slot:
-                    return self.fail("Нет свободных таймслотов")
+                    for s in live:
+                        self.set(s, "error", self.no_slots_text())
+                    return self.fail(self.no_slots_text())
                 try:
                     M["order_id"] = self.submit_supply(M["draft_id"], "MULTI_CLUSTER", live, slot)
                     break
@@ -1087,9 +1126,19 @@ class Run:
         self.log(f"Черновик {draft_id} на {len(ships)} кластеров: {len(M['slots'])} таймслотов")
 
     # --------------------------------------------------------- обёртки
-    def safe(self, s, fn):
+    def safe(self, s, fn, later=None):
         try:
             fn(s)
+        except NoSlots as e:
+            if later is None or self.stop.is_set():
+                self.failed_now.add(skey(s))
+                self.set(s, "error", str(e))
+                self.log(str(e), s, "error")
+                return
+            s["no_slots_at"] = time.time()
+            later.append(s)
+            self.set(s, "draft_ok", "нет таймслотов — повторю позже")
+            self.log(str(e) + f". Повторю через {RETRY_NO_SLOTS // 60} мин, после остальных городов", s, "warn")
         except OzonError as e:
             if self.stop.is_set():
                 self.set(s, s["status"], "остановлено")
