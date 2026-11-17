@@ -5,6 +5,7 @@
 import json
 import mimetypes
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -212,12 +213,37 @@ def api_clusters(_):
     return {"clusters": sorted([{"id": k, "name": v} for k, v in out.items()], key=lambda x: x["name"])}
 
 
+def _search_variants(q):
+    """«МОСКВА_10704» → «МОСКВА_10704», «МОСКВА 10704», «10704»: Озон ищет точки не по точному названию."""
+    q = " ".join((q or "").split())
+    out = [q]
+    if "_" in q:
+        out.append(" ".join(q.replace("_", " ").split()))
+    out += re.findall(r"\d{4,}", q)
+    return [v for i, v in enumerate(out) if v and v not in out[:i]]
+
+
 def api_dropoff(b):
-    r = client().post("/v1/warehouse/fbo/list",
-                      {"filter_by_supply_type": ["CREATE_TYPE_CROSSDOCK"], "search": b.get("q", "")})
-    return {"items": [{"warehouse_id": x.get("warehouse_id"), "name": x.get("name"),
-                       "warehouse_type": x.get("warehouse_type"), "address": x.get("address")}
-                      for x in r.get("search") or []]}
+    q = b.get("q", "")
+    c = W.make_client(ST.get_profile(), log=_search_log)
+    found = {}
+    for v in _search_variants(q):
+        r = c.post("/v1/warehouse/fbo/list", {"filter_by_supply_type": ["CREATE_TYPE_CROSSDOCK"], "search": v})
+        for x in r.get("search") or []:
+            found.setdefault(x.get("warehouse_id"), _wh(x))
+    items = list(found.values())
+    ql = q.strip().lower()
+    items.sort(key=lambda x: (ql not in (x.get("name") or "").lower(), x.get("name") or ""))
+    return {"items": items}
+
+
+def _search_log(s):
+    """Ответы Озона на поиск точек — в search.log (папка данных), чтобы было видно, что он вернул."""
+    try:
+        with open(os.path.join(ST.DATA, "search.log"), "a", encoding="utf-8") as f:
+            f.write(time.strftime("%d.%m %H:%M:%S ") + s + "\n")
+    except OSError:
+        pass
 
 
 def _wh(x):
