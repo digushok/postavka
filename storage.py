@@ -256,9 +256,25 @@ def save_profiles(d):
         _write(cur, d)
 
 
+# Магазин, выбранный в этой вкладке браузера (берётся из cookie запроса).
+# На сервере программой пользуются несколько человек сразу: у каждого свой выбранный магазин,
+# а общий «active» в profiles.json — только выбор по умолчанию для нового браузера.
+_req = threading.local()
+
+
+def set_current(pid):
+    _req.pid = pid or None
+
+
+def current():
+    return getattr(_req, "pid", None)
+
+
 def get_profile(pid=None):
     d = load_profiles()
-    pid = pid or d["active"]
+    ids = [p["id"] for p in d["profiles"]]
+    if not pid:
+        pid = current() if current() in ids else d["active"]
     for p in d["profiles"]:
         if p["id"] == pid:
             return p

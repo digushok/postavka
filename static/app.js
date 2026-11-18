@@ -59,7 +59,8 @@ $$(".tabs button").forEach((b) => (b.onclick = () => { if (b.dataset.tab === "ba
 /* ---------------- загрузка ---------------- */
 async function loadState() {
   const s = await api("/api/state");
-  APP.profile = s.profile; APP.profiles = s.profiles; APP.dataDir = s.data_dir;
+  APP.profile = s.profile; APP.profiles = s.profiles; APP.dataDir = s.data_dir; APP.server = !!s.server;
+  document.body.classList.toggle("server", APP.server);
   APP.ver = { version: s.version, date: s.release_date, repo: s.repo, changes: s.changes || [] };
   $("#verFoot").textContent = `Поставки Ozon · версия ${s.version} от ${dmy(s.release_date)}`;
   document.title = `Поставки Ozon ${s.version}`;
@@ -924,13 +925,14 @@ async function checkUpdate(force, quiet) {
   if (!quiet) $("#updRes").innerHTML = '<div class="upd">Проверяю…</div>';
   try {
     const r = await api("/api/update", { force: !!force });
-    const box = r.ok ? (r.newer
-      ? `<div class="upd new"><b>Доступна версия ${esc(r.latest)}</b><a class="btn primary sm" href="${esc(r.url)}" target="_blank" rel="noopener">Скачать</a><a class="link" href="${esc(r.page)}" target="_blank" rel="noopener">Что нового</a></div>`
+    const box = r.ok ? (r.newer ? (APP.server
+      ? `<div class="upd new"><b>Доступна версия ${esc(r.latest)}</b><span class="muted">обновляется на сервере</span><a class="link" href="${esc(r.page)}" target="_blank" rel="noopener">Что нового</a></div>`
+      : `<div class="upd new"><b>Доступна версия ${esc(r.latest)}</b><a class="btn primary sm" href="${esc(r.url)}" target="_blank" rel="noopener">Скачать</a><a class="link" href="${esc(r.page)}" target="_blank" rel="noopener">Что нового</a></div>`)
       : `<div class="upd">У вас последняя версия (${esc(APP.ver.version)})</div>`)
       : `<div class="upd">Не удалось проверить обновления: ${esc(r.error)}</div>`;
     if (!quiet || r.newer) $("#updRes").innerHTML = box;
     const f = $("#verUpd");
-    if (r.ok && r.newer) { f.textContent = `доступна ${r.latest} — скачать`; f.href = r.url; } else { f.textContent = ""; f.removeAttribute("href"); }
+    if (r.ok && r.newer) { f.textContent = APP.server ? `доступна ${r.latest}` : `доступна ${r.latest} — скачать`; f.href = APP.server ? r.page : r.url; } else { f.textContent = ""; f.removeAttribute("href"); }
   } catch (e) { if (!quiet) $("#updRes").innerHTML = `<div class="upd">${esc(e.message)}</div>`; }
 }
 $("#updCheck").onclick = () => checkUpdate(true);

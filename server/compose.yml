@@ -1,0 +1,18 @@
+# Поставки Ozon на сервере. Запуск: docker compose up -d
+# Обновление до последней версии: docker compose pull && docker compose up -d
+services:
+  postavka:
+    image: ghcr.io/digushok/postavka:latest
+    container_name: postavka
+    restart: unless-stopped
+    environment:
+      TZ: Europe/Moscow
+    volumes:
+      # Данные: магазины, ключи API, товары, партии и этикетки.
+      # Сюда же копируется папка %APPDATA%\Поставки Ozon\data с Windows-компьютера.
+      - ./data:/data
+    ports:
+      # Только для самого сервера: снаружи программа доступна через Tailscale
+      # (tailscale serve → http://127.0.0.1:8766). В домашней сети порт не открыт —
+      # на странице есть API-ключи магазинов, а входа по паролю у программы нет.
+      - "127.0.0.1:8766:8765"
