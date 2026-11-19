@@ -1,18 +1,19 @@
-# Поставки Ozon на сервере. Запуск: docker compose up -d
-# Обновление до последней версии: docker compose pull && docker compose up -d
+# Поставки Ozon на сервере kucha (OpenMediaVault → Services → Compose → Files).
+# Открывается через Tailscale: https://kucha.tailc40790.ts.net:8443/
+# Обновление: в OMV у этого файла кнопки Pull, затем Up.
 services:
   postavka:
-    image: ghcr.io/digushok/postavka:latest
+    image: ghcr.io/digushok/postavka:latest   # или номер версии, например :1.7.9
     container_name: postavka
     restart: unless-stopped
     environment:
       TZ: Europe/Moscow
     volumes:
-      # Данные: магазины, ключи API, товары, партии и этикетки.
-      # Сюда же копируется папка %APPDATA%\Поставки Ozon\data с Windows-компьютера.
-      - ./data:/data
+      # Магазины, ключи API, товары, партии и этикетки.
+      # Сюда копируется содержимое %APPDATA%\Поставки Ozon\data с Windows-компьютера.
+      - /srv/dev-disk-by-uuid-9e04cc1f-10cc-4f8f-a469-0c7579a5c598/config/postavka/data:/data
     ports:
-      # Только для самого сервера: снаружи программа доступна через Tailscale
-      # (tailscale serve → http://127.0.0.1:8766). В домашней сети порт не открыт —
-      # на странице есть API-ключи магазинов, а входа по паролю у программы нет.
-      - "127.0.0.1:8766:8765"
+      # Только для самого сервера: снаружи — через Tailscale (serve --https=8443 → 127.0.0.1:8767).
+      # 8766 занят Ozon rFBS. Входа по паролю у программы нет, а в настройках лежат API-ключи,
+      # поэтому в домашнюю сеть порт не открываем.
+      - "127.0.0.1:8767:8765"

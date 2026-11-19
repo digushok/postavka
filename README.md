@@ -67,4 +67,4 @@
 
 Серверный режим включается переменной `OZON_SUPPLIES_SERVER=1` (в образе уже включён):
 сервер слушает `HOST:PORT` для всех, браузер не открывает, данные в `OZON_SUPPLIES_DATA`.
-Проверить локально: `docker build -t postavka . && docker run --rm -p 8766:8765 -v "$PWD/data:/data" postavka`.
+Проверить локально: `docker build -t postavka . && docker run --rm -p 8767:8765 -v "$PWD/data:/data" postavka`.

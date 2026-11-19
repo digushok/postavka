@@ -31,7 +31,7 @@ from version import CHANGES, RELEASE_DATE, REPO, VERSION
 import version as V
 
 SERVER_MODE = os.environ.get("OZON_SUPPLIES_SERVER", "").lower() in ("1", "true", "yes")
-COOKIE = "shop"
+COOKIE = "postavka_shop"   # своё имя: на том же адресе сервера могут жить другие программы
 
 
 def client():
