@@ -1,0 +1,13 @@
+.git
+.github
+data
+build
+dist
+release
+.venv
+__pycache__
+*.pyc
+tests
+tools
+docs
+server

@@ -313,3 +313,7 @@ details.card[open] > summary { margin-bottom: 12px; }
   main { padding: 8px 14px 170px; }
   .bitem { grid-template-columns: 1fr 1fr; }
 }
+
+/* на сервере: нет локальных папок и кнопки «Закрыть программу» */
+body.server #quitBtn, body.server #dFind, body.server #dOpen, body.server #dFound,
+body.server #bFolder, body.server #bLabelsFolder { display: none !important; }

@@ -1,6 +1,8 @@
-"""Поставки Ozon FBO — локальная программа. Запуск: python app.py
+"""Поставки Ozon FBO. Запуск: python app.py
 
-Открывает в браузере страницу http://127.0.0.1:8765. Работает только на этом компьютере.
+Windows (.exe): открывает в браузере http://127.0.0.1:8765, работает только на этом компьютере.
+Сервер (Docker): переменная OZON_SUPPLIES_SERVER=1 — слушает HOST:PORT для всех,
+без браузера, без поиска старых настроек и без кнопок «Открыть папку» и «Закрыть программу».
 """
 import json
 import mimetypes
@@ -27,6 +29,9 @@ ROOT = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file_
 STATIC = os.path.join(ROOT, "static")
 from version import CHANGES, RELEASE_DATE, REPO, VERSION
 import version as V
+
+SERVER_MODE = os.environ.get("OZON_SUPPLIES_SERVER", "").lower() in ("1", "true", "yes")
+COOKIE = "postavka_shop"   # своё имя: на том же адресе сервера могут жить другие программы
 
 
 def client():
@@ -106,15 +111,23 @@ def api_import(b):
     if not had_key or d["active"] not in {p["id"] for p in d["profiles"]}:
         d["active"] = data.get("active") if data.get("active") in {p["id"] for p in d["profiles"]} else profiles[0]["id"]
     ST.save_profiles(d)
+    ST.set_current(d["active"])
     return {"imported": len(profiles)}
 
 
+def _local_only():
+    if SERVER_MODE:
+        raise OzonError("На сервере это недоступно")
+
+
 def api_legacy_find(_):
+    _local_only()
     return {"found": [{"path": p, "date": time.strftime("%d.%m.%Y %H:%M", time.localtime(t))}
                       for p, t in ST.find_legacy(max_depth=5, time_limit=20)]}
 
 
 def api_legacy_import(b):
+    _local_only()
     path = b.get("path") or ""
     src = os.path.join(path, "profiles.json")
     if not os.path.isfile(src):
@@ -132,7 +145,8 @@ def api_state(_):
     d = ST.load_profiles()
     return {"version": VERSION, "release_date": RELEASE_DATE, "repo": REPO,
             "changes": [{"version": v, "date": dt, "items": it} for v, dt, it in CHANGES],
-            "active": d["active"], "data_dir": ST.DATA, "import_note": _note(),
+            "active": ST.get_profile()["id"], "data_dir": ST.DATA, "import_note": _note(),
+            "server": SERVER_MODE,
             "profiles": [{"id": p["id"], "name": p["name"], "demo": p.get("demo")} for p in d["profiles"]],
             "profile": pub_profile(ST.get_profile())}
 
@@ -160,11 +174,13 @@ def api_profile_new(b):
         p["pass"] = {"enabled": True, "driver_name": "Иванов Иван Иванович", "driver_phone": "+79990000000",
                      "vehicle_model": "ГАЗель", "vehicle_number": "А123ВС777"}
         ST.save_profile(p)
+    ST.set_current(p["id"])
     return api_state({})
 
 
 def api_profile_select(b):
-    ST.set_active(b["id"])
+    ST.set_active(b["id"])          # выбор по умолчанию для нового браузера
+    ST.set_current(b["id"])         # выбор этого браузера (cookie)
     return api_state({})
 
 
@@ -670,6 +686,7 @@ def api_batch_rebuild(b):
 
 
 def api_open_folder(b):
+    _local_only()
     pid = ST.get_profile()["id"]
     path = ST.DATA if b.get("id") == "__data__" else ST.batch_dir(pid, b["id"])
     if b.get("sub"):
@@ -715,7 +732,18 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _shop_from_cookie(self):
+        """Выбранный в этом браузере магазин — у каждого пользователя свой."""
+        pid = None
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == COOKIE and re.fullmatch(r"[0-9a-zA-Z_-]{1,40}", v):
+                pid = v
+        ST.set_current(pid)
+        return pid
+
     def do_GET(self):
+        self._shop_from_cookie()
         u = urllib.parse.urlparse(self.path)
         path = urllib.parse.unquote(u.path)
         if path == "/export":
@@ -750,9 +778,14 @@ class H(BaseHTTPRequestHandler):
         if not fn:
             return self._send(404, {"error": "нет такого метода"})
         n = int(self.headers.get("Content-Length") or 0)
+        before = self._shop_from_cookie()
         try:
             body = json.loads(self.rfile.read(n).decode("utf-8") or "{}") if n else {}
-            self._send(200, fn(body))
+            res = fn(body)
+            extra = None
+            if ST.current() and ST.current() != before:
+                extra = {"Set-Cookie": f"{COOKIE}={ST.current()}; Path=/; Max-Age=31536000; SameSite=Lax"}
+            self._send(200, res, extra=extra)
         except OzonError as e:
             self._send(400, {"error": str(e)})
         except Exception as e:
@@ -794,8 +827,25 @@ def already_running(port):
     return True
 
 
+def serve_server_mode(port):
+    """Сервер (Docker): один процесс, слушает все адреса, браузер не открывает."""
+    host = os.environ.get("HOST") or "0.0.0.0"
+    os.makedirs(ST.DATA, exist_ok=True)
+    migrate_clusters()
+    global SERVER
+    SERVER = ThreadingHTTPServer((host, port), H)
+    SERVER.daemon_threads = True
+    print(f"Поставки Ozon {VERSION} (сервер) слушают http://{host}:{port}/, данные: {ST.DATA}", flush=True)
+    try:
+        SERVER.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
 def main():
     port = int(os.environ.get("PORT") or 8765)
+    if SERVER_MODE:
+        return serve_server_mode(port)
     if getattr(sys, "frozen", False):
         # у .exe нет консоли — пишем вывод в файл рядом с данными
         os.makedirs(ST.DATA, exist_ok=True)
@@ -872,6 +922,7 @@ def api_ping(_):
 
 
 def api_quit(_):
+    _local_only()
     if any(W.is_running(b) for b in list(W.RUNNING)):
         raise OzonError("Сейчас создаются поставки — дождитесь окончания или остановите их")
     threading.Timer(0.3, lambda: SERVER and SERVER.shutdown()).start()
