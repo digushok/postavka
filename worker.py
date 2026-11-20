@@ -56,7 +56,7 @@ def skey(s):
     return s.get("key") or str(s["cluster_id"])
 
 
-REPLACE = {}                 # batch_id -> [(ключ поставки, новый cluster_id, название)] — замены во время работы
+REPLACE = {}                 # batch_id -> [(ключ, новый cluster_id, название, повтор?)] — замены во время работы
 
 
 def replaceable(s):
@@ -64,14 +64,17 @@ def replaceable(s):
     return not s.get("cancelled") and not s.get("order_id") and (s.get("status") == "error" or s.get("excluded"))
 
 
-def apply_replacement(batch, key, cluster_id, cluster_name):
-    """Перенаправляет поставку в другой кластер (можно в уже выбранный — уйдёт отдельной заявкой)."""
+def apply_replacement(batch, key, cluster_id, cluster_name, retry=False):
+    """Перенаправляет поставку в другой кластер (можно в уже выбранный — уйдёт отдельной заявкой).
+    retry=True — повторная попытка в тот же кластер: название и кластер не меняются."""
     s = next((x for x in batch["shipments"] if skey(x) == key), None)
     if s is None:
         raise OzonError("Поставка не найдена")
     if s.get("order_id"):
         raise OzonError("По этой поставке заявка уже создана — сначала отмените её")
     old_name = s["name"]
+    if retry:
+        cluster_id, cluster_name = s["cluster_id"], s["name"]
     cluster_id = str(cluster_id)
     taken = {skey(x) for x in batch["shipments"] if x is not s}
     new_key, n = cluster_id, 2
@@ -82,14 +85,18 @@ def apply_replacement(batch, key, cluster_id, cluster_name):
     kits = batch.get("kits")
     if kits and kits.get("alloc") and key in kits["alloc"]:
         kits["alloc"][new_key] = kits["alloc"].pop(key)
-    s.setdefault("replaced_from", old_name)
-    s.update({"cluster_id": cluster_id, "cluster_name": cluster_name, "name": cluster_name, "key": new_key,
-              "status": "new", "error": None})
+    if retry:
+        s.update({"key": new_key, "status": "new", "error": None})
+    else:
+        s.setdefault("replaced_from", old_name)
+        s.update({"cluster_id": cluster_id, "cluster_name": cluster_name, "name": cluster_name, "key": new_key,
+                  "status": "new", "error": None})
     for f in ("draft_id", "draft_at", "slots", "slots_at", "storage_wh", "ozon_cluster_name", "tried_slots",
               "excluded", "actual_cluster", "mismatch"):
         s.pop(f, None)
     same = any(str(x["cluster_id"]) == cluster_id for x in batch["shipments"] if x is not s)
-    note = f"Кластер заменён: «{old_name}» → «{cluster_name}»" + (" (отдельной заявкой)" if same else "")
+    note = ("Повторная попытка" if retry else f"Кластер заменён: «{old_name}» → «{cluster_name}»") \
+        + (" (отдельной заявкой)" if same else "")
     s.setdefault("warn", []).append(note)
     batch.setdefault("log", []).append({"t": time.strftime("%H:%M:%S"), "city": cluster_name, "msg": note, "lvl": "info"})
     return s
@@ -478,9 +485,9 @@ class Run:
         """Применяет замены кластеров, выбранные пользователем во время работы, и запускает эти поставки."""
         queue = REPLACE.pop(self.bid, [])
         started = False
-        for key, cid, name in queue:
+        for key, cid, name, retry in queue:
             try:
-                s = apply_replacement(self.batch, key, cid, name)
+                s = apply_replacement(self.batch, key, cid, name, retry)
             except OzonError as e:
                 self.log(str(e), lvl="error")
                 continue

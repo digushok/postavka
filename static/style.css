@@ -329,3 +329,9 @@ body.server #bFolder, body.server #bLabelsFolder { display: none !important; }
 .fwrap.done .done-tg { color: var(--ok); font-weight: 600; }
 .done-sum { margin: 0 0 10px; font-size: 13px; color: var(--muted); font-weight: 500; }
 .done-sum.all { color: var(--ok); font-weight: 600; }
+
+/* круглая стрелка «повторить попытку» рядом с «Заменить кластер» */
+.row-acts { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
+.btn.icon-sm { padding-left: 0; padding-right: 0; width: 30px; font-size: 16px; line-height: 1; }
+.btn.icon-sm.spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }

@@ -577,22 +577,31 @@ def api_batch_cancel(b):
 
 def api_batch_replace(b):
     """Перенаправить поставку, которую Озон не принял, в другой кластер."""
-    pid = ST.get_profile()["id"]
     cid, name = str(b.get("cluster_id") or ""), b.get("cluster_name") or ""
     if not cid:
         raise OzonError("Выберите кластер")
-    if W.is_running(b["id"]):
-        bt = ST.load_batch(pid, b["id"])
+    return _redo_shipment(b["id"], b["key"], cid, name, False)
+
+
+def api_batch_retry(b):
+    """Ещё раз попробовать создать заявку в тот же кластер."""
+    return _redo_shipment(b["id"], b["key"], None, None, True)
+
+
+def _redo_shipment(bid, key, cid, name, retry):
+    pid = ST.get_profile()["id"]
+    if W.is_running(bid):
+        bt = ST.load_batch(pid, bid)
         if bt.get("phase") == "cancelling":
             raise OzonError("Сейчас отменяются заявки — дождитесь окончания")
-        W.REPLACE.setdefault(b["id"], []).append((b["key"], cid, name))
+        W.REPLACE.setdefault(bid, []).append((key, cid, name, retry))
         return {"queued": True}
-    bt = ST.load_batch(pid, b["id"])
-    W.apply_replacement(bt, b["key"], cid, name)
+    bt = ST.load_batch(pid, bid)
+    W.apply_replacement(bt, key, cid, name, retry)
     if bt.get("phase") in ("done", "cancelled"):
         bt["phase"] = "partial"
     ST.save_batch(pid, bt)
-    W.start(pid, b["id"])
+    W.start(pid, bid)
     return {"started": True}
 
 
@@ -722,7 +731,7 @@ ROUTES = {
     "/api/batch/stop": api_batch_stop, "/api/batch/cancel": api_batch_cancel,
     "/api/batch/rebuild": api_batch_rebuild,
     "/api/batch/ack": api_batch_ack, "/api/batch/label_done": api_batch_label_done, "/api/batch/check_labels": api_batch_check_labels,
-    "/api/batch/relabel": api_batch_relabel, "/api/batch/replace": api_batch_replace, "/api/batch/delete": api_batch_delete,
+    "/api/batch/relabel": api_batch_relabel, "/api/batch/replace": api_batch_replace, "/api/batch/retry": api_batch_retry, "/api/batch/delete": api_batch_delete,
     "/api/export": api_export, "/api/import": api_import,
     "/api/legacy/find": api_legacy_find, "/api/legacy/import": api_legacy_import, "/api/batch/sync": api_batch_sync, "/api/open": api_open_folder,
 }
