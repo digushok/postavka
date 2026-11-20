@@ -338,6 +338,24 @@ def load_batch(pid, bid):
         return _read(os.path.join(batch_dir(pid, bid), "batch.json"), None)
 
 
+def load_labels_done(pid, bid):
+    """Отметки «этикетки этого состава напечатаны и наклеены»: {id группы: {"at": "дд.мм чч:мм"}}.
+    Отдельный файл, а не batch.json: создание поставок в это время может сохранять партию."""
+    with _lock:
+        return _read(os.path.join(batch_dir(pid, bid), "labels_done.json"), {})
+
+
+def set_label_done(pid, bid, gid, done):
+    with _lock:
+        d = load_labels_done(pid, bid)
+        if done:
+            d[gid] = {"at": time.strftime("%d.%m %H:%M")}
+        else:
+            d.pop(gid, None)
+        _write(os.path.join(batch_dir(pid, bid), "labels_done.json"), d)
+        return d
+
+
 def list_batches(pid):
     root = _path("shops", pid, "batches")
     out = []

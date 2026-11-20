@@ -605,6 +605,7 @@ async function loadBatches() {
         <div><div class="t">${b.done}/${b.cities}</div><div class="m">поставок готово</div></div>
         <div><div class="t">${fmt(b.boxes)}</div><div class="m">коробок</div></div>
         <div><div class="t">${esc(b.slot || "—")}</div><div class="m">таймслот</div></div>
+        <div>${b.labels ? `<div class="t ${b.labels_done === b.labels ? "good" : ""}">${b.labels_done === b.labels ? "✓ " : ""}${b.labels_done}/${b.labels}</div><div class="m">этикетки наклеены</div>` : ""}</div>
         <div class="arrow">›</div></div>`).join("") + "</div>"
       : `<div class="card"><div class="empty-state">Пока нет созданных партий. Создайте первую во вкладке «Новая поставка».</div></div>`);
     $$("#batchList [data-id]").forEach((a) => (a.onclick = () => showBatch(a.dataset.id)));
@@ -673,10 +674,16 @@ function renderBatch(b) {
   if (chk && files) h += `<div class="banner ${chk.ok ? "" : "err"}" style="margin:0 0 12px">${chk.ok ? "✓ " : ""}<b>Проверка этикеток:</b> ${esc(chk.summary)}${chk.at ? ` <span class="muted small">(${esc(chk.at)})</span>` : ""}
       ${!chk.ok && (chk.problems || []).length ? `<ul style="margin:8px 0 0">${chk.problems.slice(0, 12).map((p) => `<li>${esc(p)}</li>`).join("")}</ul>` : ""}
       ${!chk.ok && !busy ? `<div class="row"><button class="btn danger sm" id="bRelabel">Перезапросить этикетки</button><span class="muted small">По одной на каждое грузоместо — так ошибка исключена. Старые файлы этикеток не печатайте.</span></div>` : ""}</div>`;
+  const lDone = b.labels_done || {};
+  const nDone = files ? groups.filter((g) => lDone[g.id]).length : 0;
+  if (files && groups.length) h += `<div class="done-sum ${nDone === groups.length ? "all" : ""}">${nDone === groups.length ? "✓ Все этикетки наклеены" : `Готово: ${nDone} из ${groups.length}`}</div>`;
   h += `<div class="files-grid">` + groups.map((g, i) => {
     const f = (files?.groups || []).find((x) => x.id === g.id);
+    const dn = lDone[g.id];
+    const mark = files ? `<label class="done-tg" title="Отметьте, когда этикетки этого состава напечатаны и наклеены"><input type="checkbox" data-done="${esc(g.id)}" ${dn ? "checked" : ""}> ${dn ? `Готово · ${esc(dn.at)}` : "Готово"}</label>` : "";
     const inner = `<div class="pdf">PDF</div><div><div class="fn">${esc(g.name)} × ${fmt(g.qty)} шт</div><div class="fm">${g.total} кор · ${g.cities.map((c) => esc(c.name) + (c.count > 1 ? ` ×${c.count}` : "")).join(", ")}${f?.missing ? `<br><span class="warn-text">не готово для ${f.missing} пост.</span>` : ""}</div></div><div class="num">${String(i + 1).padStart(2, "0")}</div>`;
-    return f?.file ? `<a class="fcard" target="_blank" href="${fileUrl(b, f.file)}">${inner}</a>` : `<div class="fcard off">${inner}</div>`;
+    const card = f?.file ? `<a class="fcard" target="_blank" href="${fileUrl(b, f.file)}">${inner}</a>` : `<div class="fcard off">${inner}</div>`;
+    return `<div class="fwrap ${dn ? "done" : ""}">${card}${mark}</div>`;
   }).join("") + `</div></div>`;
 
   h += `<details class="card" ${b.phase === "error" || b.phase === "partial" || b.running ? "open" : ""}><summary>Журнал</summary><div class="log" id="logBox">${(b.log || []).map((l) => `<div class="${l.lvl}"><span class="t">${esc(l.t)}</span> ${l.city ? "<b>" + esc(l.city) + "</b> · " : ""}${esc(l.msg)}</div>`).join("") || '<span class="muted">пусто</span>'}</div><div class="muted small" style="margin-top:8px">Подробный журнал запросов к Ozon — файл api.log в папке партии.</div></details>`;
@@ -705,6 +712,11 @@ function renderBatch(b) {
     const s = ships.find((x) => skey(x) === el.dataset.cancel);
     if (!(await confirmBox(`<h3>Отменить заявку «${esc(s.name)}» в Озоне?</h3><p>Заявка ${esc(s.order_number || s.order_id)} будет отменена. Это действие нельзя отменить.</p>`, "Отменить заявку"))) return;
     try { await api("/api/batch/cancel", { id: b.id, cluster_ids: [skey(s)] }); }
+    catch (e) { toast(e.message, true); }
+    showBatch(b.id);
+  }));
+  $$("[data-done]").forEach((el) => (el.onchange = async () => {
+    try { await api("/api/batch/label_done", { id: b.id, group: el.dataset.done, done: el.checked }); }
     catch (e) { toast(e.message, true); }
     showBatch(b.id);
   }));

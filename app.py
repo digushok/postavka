@@ -499,6 +499,7 @@ def api_batch_create(b):
 def _batch_view(pid, b):
     b = dict(b)
     b["running"] = W.is_running(b["id"])
+    b["labels_done"] = ST.load_labels_done(pid, b["id"])
     return b
 
 
@@ -514,7 +515,10 @@ def api_batches(_):
                     "boxes": sum(len(s["boxes"]) for s in ships if not s.get("cancelled")),
                     "done": len([s for s in ships if s["status"] == "done"]),
                     "slot": b.get("chosen_slot_human"), "running": W.is_running(b["id"]),
-                    "demo": b.get("demo")})
+                    "demo": b.get("demo"),
+                    "labels": len(b.get("groups") or []) if b.get("files") else 0,
+                    "labels_done": len([g for g in b.get("groups") or []
+                                        if g["id"] in ST.load_labels_done(pid, b["id"])]) if b.get("files") else 0})
     return {"batches": out}
 
 
@@ -647,6 +651,14 @@ def api_batch_ack(b):
     return {"ok": True}
 
 
+def api_batch_label_done(b):
+    """Отметить (или снять отметку), что этикетки этого состава напечатаны и наклеены."""
+    pid = ST.get_profile()["id"]
+    if not ST.load_batch(pid, b["id"]):
+        raise OzonError("Нет такой партии")
+    return {"labels_done": ST.set_label_done(pid, b["id"], str(b["group"]), bool(b.get("done")))}
+
+
 def api_batch_delete(b):
     """Удалить партию из истории — только если в Озоне у неё нет действующих заявок."""
     import shutil
@@ -709,7 +721,7 @@ ROUTES = {
     "/api/batch": api_batch, "/api/batch/slot": api_batch_slot, "/api/batch/resume": api_batch_resume,
     "/api/batch/stop": api_batch_stop, "/api/batch/cancel": api_batch_cancel,
     "/api/batch/rebuild": api_batch_rebuild,
-    "/api/batch/ack": api_batch_ack, "/api/batch/check_labels": api_batch_check_labels,
+    "/api/batch/ack": api_batch_ack, "/api/batch/label_done": api_batch_label_done, "/api/batch/check_labels": api_batch_check_labels,
     "/api/batch/relabel": api_batch_relabel, "/api/batch/replace": api_batch_replace, "/api/batch/delete": api_batch_delete,
     "/api/export": api_export, "/api/import": api_import,
     "/api/legacy/find": api_legacy_find, "/api/legacy/import": api_legacy_import, "/api/batch/sync": api_batch_sync, "/api/open": api_open_folder,
