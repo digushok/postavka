@@ -654,7 +654,7 @@ function renderBatch(b) {
       <div class="k"><span>${b.phase === "cancelled" ? "Отменено" : "Готово"}</span><b>${b.phase === "cancelled" ? `${ships.length} из ${ships.length}` : `${done} из ${active.length}`}</b></div>
     </div>
     <div class="progress ${pct === 100 ? "ok" : ""}"><i style="width:${pct}%"></i></div>
-    ${b.phase !== "cancelling" && ships.some(canReplace) ? `<div class="banner warn" style="margin:14px 0 0"><b>Озон не принял поставку в: ${ships.filter(canReplace).map((s) => esc(s.name)).join(", ")}.</b> Нажмите «Заменить кластер» в строке — можно выбрать любой кластер, в том числе уже выбранный в этой партии.</div>` : ""}
+    ${b.phase !== "cancelling" && ships.some(canReplace) ? `<div class="banner warn" style="margin:14px 0 0"><b>Озон не принял поставку в: ${ships.filter(canReplace).map((s) => esc(s.name)).join(", ")}.</b> Нажмите ↻ в строке, чтобы попробовать ещё раз, или «Заменить кластер» — можно выбрать любой кластер, в том числе уже выбранный в этой партии.</div>` : ""}
     ${b.phase === "cancelling" ? `<div class="banner" style="margin:14px 0 0">Отменяю заявки в Озоне — это займёт до пары минут. Можно не ждать: итог появится здесь.</div>` : ""}
     ${b.phase === "cancelled" ? `<div class="banner" style="margin:14px 0 0">Все заявки этой партии отменены${b.cancel_result?.at ? " " + esc(b.cancel_result.at) : ""}. Чтобы отправить те же товары снова, нажмите «Создать заново».</div>` : ""}
     ${b.error && b.phase !== "cancelled" ? `<div class="banner err" style="margin:14px 0 0">${esc(b.error)}</div>` : ""}
@@ -665,7 +665,7 @@ function renderBatch(b) {
   h += `<div class="card"><div class="card-h"><div><h2>Поставки</h2></div></div><div class="scroll"><table class="grid"><thead><tr><th>Кластер</th><th>По данным Озона</th><th>Статус</th><th>Заявка</th><th class="r">Коробок</th><th class="r">Шт</th><th>Таймслот</th><th>Примечания</th><th></th></tr></thead><tbody>` +
     ships.map((s) => { const cl = s.actual_cluster || s.ozon_cluster_name || s.cluster_name || "—"; return `<tr class="${s.mismatch && !s.cancelled ? "mismatch" : ""} ${s.cancelled ? "dim" : ""}"><td><b>${esc(s.name)}</b></td><td class="small">${esc(cl)}${s.mismatch ? ' <span class="err-text">не тот кластер!</span>' : ""}</td><td>${tag(SST, s.status)}</td><td>${esc(s.order_number || s.order_id || "—")}</td><td class="r">${s.boxes.length}</td><td class="r">${fmt(units(s))}</td><td class="small">${s.slot ? esc(humanSlot(s.slot)) : s.no_slot && s.order_id ? '<span class="warn-text">без таймслота</span>' : "—"}</td>
       <td>${typeof s.verified === "number" ? `<div class="good small">✓ состав подтверждён Озоном</div>` : ""}${s.error ? `<div class="err-text">${esc(s.error)}</div>` : ""}${(s.warn || []).map((w) => `<div class="warn-text">${esc(w)}</div>`).join("")}</td>
-      <td class="r">${!busy && !b.multi && s.order_id && !s.cancelled ? `<button class="btn danger sm" data-cancel="${esc(skey(s))}">Отменить</button>` : ""}${canReplace(s) && b.phase !== "cancelling" ? `<button class="btn soft sm" data-repl="${esc(skey(s))}">Заменить кластер</button>` : ""}</td></tr>`; }).join("") + `</tbody></table></div>${b.synced_at ? `<div class="muted small" style="margin-top:8px">Сверено с Озоном ${esc(b.synced_at)}</div>` : ""}</div>`;
+      <td class="r">${!busy && !b.multi && s.order_id && !s.cancelled ? `<button class="btn danger sm" data-cancel="${esc(skey(s))}">Отменить</button>` : ""}${canReplace(s) && b.phase !== "cancelling" ? `<span class="row-acts"><button class="btn soft sm icon-sm" data-retry="${esc(skey(s))}" title="Повторить попытку в этот же кластер" aria-label="Повторить попытку">↻</button><button class="btn soft sm" data-repl="${esc(skey(s))}">Заменить кластер</button></span>` : ""}</td></tr>`; }).join("") + `</tbody></table></div>${b.synced_at ? `<div class="muted small" style="margin-top:8px">Сверено с Озоном ${esc(b.synced_at)}</div>` : ""}</div>`;
 
   const groups = b.groups || [];
   const files = b.files;
@@ -703,6 +703,12 @@ function renderBatch(b) {
     showBatch(b.id);
   });
   $$("[data-repl]").forEach((el) => (el.onclick = () => askReplace(b, ships.find((x) => skey(x) === el.dataset.repl))));
+  $$("[data-retry]").forEach((el) => (el.onclick = async () => {
+    el.disabled = true; el.classList.add("spin");
+    try { await api("/api/batch/retry", { id: b.id, key: el.dataset.retry }); toast("Пробую ещё раз…"); }
+    catch (e) { toast(e.message, true); }
+    showBatch(b.id);
+  }));
   const ask = ships.find((s) => canReplace(s) && !PROMPTED.has(`${b.id}|${skey(s)}|${s.error}`));
   if (ask && b.phase !== "cancelling" && $("#modal").classList.contains("hidden")) {
     PROMPTED.add(`${b.id}|${skey(ask)}|${ask.error}`);
