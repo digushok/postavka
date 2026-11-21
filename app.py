@@ -500,6 +500,7 @@ def _batch_view(pid, b):
     b = dict(b)
     b["running"] = W.is_running(b["id"])
     b["labels_done"] = ST.load_labels_done(pid, b["id"])
+    b["barcodes"] = _barcodes_view(pid, b)
     return b
 
 
@@ -668,6 +669,73 @@ def api_batch_label_done(b):
     return {"labels_done": ST.set_label_done(pid, b["id"], str(b["group"]), bool(b.get("done")))}
 
 
+def _sku(v):
+    sku = str(v or "").strip()
+    if not re.fullmatch(r"\d{1,20}", sku):
+        raise OzonError("Неверный SKU")
+    return sku
+
+
+def api_product_label_upload(b):
+    """Загрузить этикетку товара (PDF из кабинета Озона). Хранится одна на SKU для всех партий."""
+    import base64
+    pid = ST.get_profile()["id"]
+    sku = _sku(b.get("sku"))
+    try:
+        data = base64.b64decode(b.get("data") or "")
+    except Exception:
+        raise OzonError("Не удалось прочитать файл")
+    if not data.startswith(b"%PDF"):
+        raise OzonError("Это не PDF. Скачайте этикетку товара в кабинете Озона и загрузите её сюда")
+    if len(data) > 10 * 1024 * 1024:
+        raise OzonError("Файл больше 10 МБ")
+    path = ST.product_label_path(pid, sku)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    try:
+        size = L.check_label_pdf(tmp)
+    except Exception as e:
+        os.remove(tmp)
+        raise OzonError(f"Не удалось открыть PDF: {e}")
+    os.replace(tmp, path)
+    return {"ok": True, "size": size}
+
+
+def _barcodes_view(pid, b):
+    """Для блока «Штрихкоды товаров»: по каждому SKU — сколько штук, в сколько городов, есть ли этикетка."""
+    out = []
+    for p in b.get("products") or []:
+        plan = L.barcode_plan(b, p["sku"])
+        if not plan:
+            continue
+        out.append({"sku": str(p["sku"]), "name": p.get("short") or p.get("name") or str(p["sku"]),
+                    "offer_id": p.get("offer_id"), "units": sum(q for _, q in plan), "cities": len(plan),
+                    "has_label": os.path.isfile(ST.product_label_path(pid, p["sku"]))})
+    return out
+
+
+def barcodes_file(bid, sku):
+    """Собирает PDF штрихкодов товара для партии. Возвращает (путь, имя файла)."""
+    pid = ST.get_profile()["id"]
+    sku = _sku(sku)
+    bt = ST.load_batch(pid, bid)
+    if not bt:
+        raise OzonError("Нет такой партии")
+    label = ST.product_label_path(pid, sku)
+    if not os.path.isfile(label):
+        raise OzonError("Сначала загрузите этикетку товара из кабинета Озона")
+    plan = L.barcode_plan(bt, sku)
+    if not plan:
+        raise OzonError("Этого товара нет в поставках партии")
+    p = next((x for x in bt.get("products") or [] if str(x["sku"]) == sku), {})
+    name = L.safe_name(f"Штрихкоды — {p.get('short') or p.get('name') or sku} — {sum(q for _, q in plan)} шт") + ".pdf"
+    out = os.path.join(ST.batch_dir(pid, bid), "Штрихкоды", name)
+    L.build_barcodes(label, plan, out)
+    return out, name
+
+
 def api_batch_delete(b):
     """Удалить партию из истории — только если в Озоне у неё нет действующих заявок."""
     import shutil
@@ -730,7 +798,7 @@ ROUTES = {
     "/api/batch": api_batch, "/api/batch/slot": api_batch_slot, "/api/batch/resume": api_batch_resume,
     "/api/batch/stop": api_batch_stop, "/api/batch/cancel": api_batch_cancel,
     "/api/batch/rebuild": api_batch_rebuild,
-    "/api/batch/ack": api_batch_ack, "/api/batch/label_done": api_batch_label_done, "/api/batch/check_labels": api_batch_check_labels,
+    "/api/batch/ack": api_batch_ack, "/api/product_label/upload": api_product_label_upload, "/api/batch/label_done": api_batch_label_done, "/api/batch/check_labels": api_batch_check_labels,
     "/api/batch/relabel": api_batch_relabel, "/api/batch/replace": api_batch_replace, "/api/batch/retry": api_batch_retry, "/api/batch/delete": api_batch_delete,
     "/api/export": api_export, "/api/import": api_import,
     "/api/legacy/find": api_legacy_find, "/api/legacy/import": api_legacy_import, "/api/batch/sync": api_batch_sync, "/api/open": api_open_folder,
@@ -772,6 +840,15 @@ class H(BaseHTTPRequestHandler):
             name = urllib.parse.quote(f"Поставки Ozon — настройки {time.strftime('%Y-%m-%d')}.json")
             return self._send(200, data, "application/json; charset=utf-8",
                               {"Content-Disposition": f"attachment; filename=\"ozon-settings.json\"; filename*=UTF-8''{name}"})
+        if path.startswith("/barcodes/"):
+            parts = path.split("/")
+            try:
+                full, name = barcodes_file(parts[2], parts[3] if len(parts) > 3 else "")
+            except OzonError as e:
+                return self._send(400, str(e).encode("utf-8"), "text/plain; charset=utf-8")
+            with open(full, "rb") as f:
+                return self._send(200, f.read(), "application/pdf",
+                                  {"Content-Disposition": f"inline; filename*=UTF-8''{urllib.parse.quote(name)}"})
         if path.startswith("/files/"):
             _, _, bid, rel = path.split("/", 3)
             base = os.path.realpath(ST.batch_dir(ST.get_profile()["id"], bid))
