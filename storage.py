@@ -356,6 +356,11 @@ def set_label_done(pid, bid, gid, done):
         return d
 
 
+def product_label_path(pid, sku):
+    """Этикетка товара, скачанная из кабинета Озона, — одна на SKU, общая для всех партий магазина."""
+    return _path("shops", pid, "product_labels", f"{sku}.pdf")
+
+
 def list_batches(pid):
     root = _path("shops", pid, "batches")
     out = []

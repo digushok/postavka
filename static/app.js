@@ -667,6 +667,7 @@ function renderBatch(b) {
       <td>${typeof s.verified === "number" ? `<div class="good small">✓ состав подтверждён Озоном</div>` : ""}${s.error ? `<div class="err-text">${esc(s.error)}</div>` : ""}${(s.warn || []).map((w) => `<div class="warn-text">${esc(w)}</div>`).join("")}</td>
       <td class="r">${!busy && !b.multi && s.order_id && !s.cancelled ? `<button class="btn danger sm" data-cancel="${esc(skey(s))}">Отменить</button>` : ""}${canReplace(s) && b.phase !== "cancelling" ? `<span class="row-acts"><button class="btn soft sm icon-sm" data-retry="${esc(skey(s))}" title="Повторить попытку в этот же кластер" aria-label="Повторить попытку">↻</button><button class="btn soft sm" data-repl="${esc(skey(s))}">Заменить кластер</button></span>` : ""}</td></tr>`; }).join("") + `</tbody></table></div>${b.synced_at ? `<div class="muted small" style="margin-top:8px">Сверено с Озоном ${esc(b.synced_at)}</div>` : ""}</div>`;
 
+  h += barcodesCard(b);
   const groups = b.groups || [];
   const files = b.files;
   h += `<div class="card"><div class="card-h"><div><h2>Этикетки</h2><p class="sub">${files ? "Один файл — одинаковые коробки. Печатайте и клейте на любую коробку этого состава." : "Появятся, когда поставки будут созданы"}</p></div><div class="actions">${files?.all ? `<a class="btn soft" target="_blank" href="${fileUrl(b, files.all)}">Все этикетки</a>` : ""}${files?.packing ? `<a class="btn soft" target="_blank" href="${fileUrl(b, files.packing)}">Лист сборки</a>` : ""}${files && !busy ? '<button class="btn ghost" id="bCheckLabels">Проверить этикетки</button>' : ""}${files ? '<button class="btn ghost" id="bLabelsFolder">Папка</button>' : ""}</div></div>`;
@@ -721,6 +722,17 @@ function renderBatch(b) {
     catch (e) { toast(e.message, true); }
     showBatch(b.id);
   }));
+  $$("[data-bcup]").forEach((el) => (el.onclick = () => { const f = $("#bcFile"); f.dataset.sku = el.dataset.bcup; f.click(); }));
+  $("#bcFile") && ($("#bcFile").onchange = async (e) => {
+    const f = e.target.files[0], sku = e.target.dataset.sku; e.target.value = "";
+    if (!f) return;
+    try {
+      const data = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(",")[1] || ""); r.onerror = rej; r.readAsDataURL(f); });
+      const r = await api("/api/product_label/upload", { sku, data });
+      toast(`Этикетка загружена (${r.size[0]}×${r.size[1]} мм)`);
+    } catch (err) { toast(err.message, true); }
+    showBatch(b.id);
+  });
   $$("[data-done]").forEach((el) => (el.onchange = async () => {
     try { await api("/api/batch/label_done", { id: b.id, group: el.dataset.done, done: el.checked }); }
     catch (e) { toast(e.message, true); }
@@ -821,6 +833,23 @@ function recreate(b) {
   }
   saveDraft(); closeBatch(); showTab("new"); renderNew();
   toast("Форма заполнена данными партии — проверьте и нажмите «Создать поставки»");
+}
+function barcodesCard(b) {
+  const list = b.barcodes || [];
+  if (!list.length) return "";
+  const done = b.labels_done || {};
+  const nDone = list.filter((x) => done["sku:" + x.sku]).length;
+  return `<div class="card"><div class="card-h"><div><h2>Штрихкоды товаров</h2><p class="sub">По каждому товару: штрихкоды для каждого города подряд, между городами пустая этикетка. Города — от меньшего количества к большему.</p></div><div class="actions"><span class="muted small">${nDone === list.length ? '<span class="good">✓ Все наклеены</span>' : `Готово: ${nDone} из ${list.length}`}</span></div></div>
+    <div class="bc-list">${list.map((x) => {
+      const dn = done["sku:" + x.sku];
+      return `<div class="bc-row ${dn ? "done" : ""}">
+        <div class="bc-n"><b>${esc(x.name)}</b> <span class="muted small">SKU ${esc(x.sku)}${x.offer_id ? " · " + esc(x.offer_id) : ""}</span></div>
+        <div class="muted small bc-m">${fmt(x.units)} шт · ${x.cities} ${x.cities === 1 ? "город" : x.cities < 5 ? "города" : "городов"}</div>
+        <div class="bc-a">${x.has_label
+          ? `<a class="btn soft sm" target="_blank" href="/barcodes/${encodeURIComponent(b.id)}/${encodeURIComponent(x.sku)}">PDF</a><a class="link small" data-bcup="${esc(x.sku)}" title="Загрузить другую этикетку">заменить</a>`
+          : `<button class="btn primary sm" data-bcup="${esc(x.sku)}" title="Скачайте этикетку товара в кабинете Озона и загрузите сюда — один раз для этого товара">Загрузить этикетку</button>`}
+        <label class="done-tg" title="Штрихкоды этого товара наклеены"><input type="checkbox" data-done="sku:${esc(x.sku)}" ${dn ? "checked" : ""}>${dn ? esc(dn.at) : ""}</label></div></div>`;
+    }).join("")}</div><input type="file" id="bcFile" accept=".pdf,application/pdf" class="hidden"></div>`;
 }
 function fileUrl(b, rel) { return `/files/${encodeURIComponent(b.id)}/${rel.split("/").map(encodeURIComponent).join("/")}`; }
 function humanSlot(s) {

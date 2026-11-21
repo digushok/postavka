@@ -335,3 +335,14 @@ body.server #bFolder, body.server #bLabelsFolder { display: none !important; }
 .btn.icon-sm { padding-left: 0; padding-right: 0; width: 30px; font-size: 16px; line-height: 1; }
 .btn.icon-sm.spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* штрихкоды товаров: компактный список, строка на товар */
+.bc-list { display: flex; flex-direction: column; }
+.bc-row { display: grid; grid-template-columns: 1fr auto auto; gap: 14px; align-items: center; padding: 7px 4px; border-top: 1px solid var(--line); }
+.bc-row:first-child { border-top: 0; }
+.bc-row.done { background: var(--ok-soft); border-radius: var(--r-sm); }
+.bc-row.done .bc-n b { text-decoration: line-through; text-decoration-color: rgba(19, 138, 82, .5); }
+.bc-a { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+.bc-a .done-tg { padding: 0; }
+.bc-row.done .done-tg { color: var(--ok); font-weight: 600; }
+@media (max-width: 640px) { .bc-row { grid-template-columns: 1fr auto; } .bc-m { grid-column: 1; } }

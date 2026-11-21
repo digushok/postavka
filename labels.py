@@ -212,3 +212,46 @@ def verify_outputs(batch, bdir):
                else f"найдено проблем: {len(problems)}")
     return {"ok": ok, "summary": summary, "problems": problems[:50], "bad_ships": sorted(bad_ships),
             "boxes": len(expected), "pages": pages_total, "at": __import__("time").strftime("%d.%m %H:%M")}
+
+
+# ---------------- штрихкоды товаров (этикетка товара из кабинета Озона)
+def barcode_plan(batch, sku):
+    """Сколько штук товара едет в каждый город: [(город, шт)], по возрастанию количества."""
+    sku = str(sku)
+    out = []
+    for n, s in enumerate(batch.get("shipments") or []):
+        if s.get("cancelled"):
+            continue
+        q = int((s.get("items") or {}).get(sku) or 0)
+        if q > 0:
+            out.append((q, n, s.get("name") or ""))
+    return [(name, q) for q, _, name in sorted(out)]
+
+
+def check_label_pdf(path):
+    """Загруженный файл — PDF хотя бы с одной страницей. Возвращает размер страницы в мм."""
+    r = PdfReader(path)
+    if not r.pages:
+        raise ValueError("в файле нет страниц")
+    box = r.pages[0].mediabox
+    return round(float(box.width) / 72 * 25.4), round(float(box.height) / 72 * 25.4)
+
+
+def build_barcodes(label_pdf, plan, out_path):
+    """Этикетка товара (первая страница файла) × количество для каждого города,
+    между городами — одна пустая страница того же размера. Возвращает число страниц."""
+    page = PdfReader(label_pdf).pages[0]
+    w_, h_ = float(page.mediabox.width), float(page.mediabox.height)
+    w = PdfWriter()
+    pages = 0
+    for i, (_, q) in enumerate(plan):
+        if i:
+            w.add_blank_page(w_, h_)
+            pages += 1
+        for _ in range(q):
+            w.add_page(page)
+            pages += 1
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "wb") as f:
+        w.write(f)
+    return pages
