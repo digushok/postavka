@@ -333,7 +333,7 @@ body.server #bFolder, body.server #bLabelsFolder { display: none !important; }
 /* круглая стрелка «повторить попытку» рядом с «Заменить кластер» */
 .row-acts { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
 .btn.icon-sm { padding-left: 0; padding-right: 0; width: 30px; font-size: 16px; line-height: 1; }
-.btn.icon-sm.spin { animation: spin 1s linear infinite; }
+.btn.icon-sm.spin svg { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* штрихкоды товаров: компактный список, строка на товар */
@@ -346,3 +346,11 @@ body.server #bFolder, body.server #bLabelsFolder { display: none !important; }
 .bc-a .done-tg { padding: 0; }
 .bc-row.done .done-tg { color: var(--ok); font-weight: 600; }
 @media (max-width: 640px) { .bc-row { grid-template-columns: 1fr auto; } .bc-m { grid-column: 1; } }
+
+/* стрелка «повторить» — иконка по центру кнопки */
+.btn.icon-sm { display: inline-flex; align-items: center; justify-content: center; align-self: stretch; }
+.btn.icon-sm svg { display: block; }
+/* карандаш «переименовать партию» */
+.icon-sm-plain { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; }
+.icon-sm-plain:hover { background: var(--field); color: var(--accent); }
+.bdate { font-weight: 400; margin-left: 4px; }

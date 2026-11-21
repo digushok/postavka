@@ -600,7 +600,7 @@ async function loadBatches() {
     const r = await api("/api/batches");
     $("#batchList").innerHTML = `<div class="page-h"><h1>Партии поставок</h1></div>` + (r.batches.length ? `<div class="blist">` +
       r.batches.map((b) => `<div class="bitem" data-id="${esc(b.id)}">
-        <div><div class="t">${esc(b.created)}</div><div class="m">${b.demo ? "демо · " : ""}партия ${esc(b.id)}</div></div>
+        <div><div class="t">${esc(b.title || b.created)}</div><div class="m">${b.demo ? "демо · " : ""}${b.title ? esc(b.created) : `партия ${esc(b.id)}`}</div></div>
         <div>${b.phase === "cancelling" || b.phase === "cancelled" ? tag(PHASE, b.phase) : b.running ? '<span class="chip run">выполняется</span>' : tag(PHASE, b.phase)}</div>
         <div><div class="t">${b.done}/${b.cities}</div><div class="m">поставок готово</div></div>
         <div><div class="t">${fmt(b.boxes)}</div><div class="m">коробок</div></div>
@@ -636,7 +636,7 @@ function renderBatch(b) {
   const pref = b.slot_pref || {};
   const slotText = b.chosen_slot_human || (b.mode === "auto" ? `желаемо ${dmy(pref.date || pref.date_from)} ${pref.time || pref.time_from || ""}` : b.mode === "none" ? "без таймслота" : "выбор из списка");
   let h = `<a class="back" id="backList">← Все партии</a>
-    <div class="card"><div class="bhead"><h2>Партия от ${esc(b.created)}</h2>${busy && b.phase !== "cancelling" ? '<span class="chip run">выполняется</span>' : tag(PHASE, b.phase)}${b.demo ? '<span class="chip plain">демо</span>' : ""}
+    <div class="card"><div class="bhead"><h2>${b.title ? `${esc(b.title)} <span class="muted small bdate">от ${esc(b.created)}</span>` : `Партия от ${esc(b.created)}`}</h2><button class="icon-sm-plain" id="bRename" title="Переименовать партию" aria-label="Переименовать партию"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>${busy && b.phase !== "cancelling" ? '<span class="chip run">выполняется</span>' : tag(PHASE, b.phase)}${b.demo ? '<span class="chip plain">демо</span>' : ""}
     <div class="actions">
       ${busy && b.phase !== "cancelling" ? '<button class="btn" id="bStop">Остановить</button>' : ""}
       ${!busy && ["error", "partial", "stopped", "new"].includes(b.phase) ? '<button class="btn primary" id="bResume">Продолжить</button>' : ""}
@@ -665,7 +665,7 @@ function renderBatch(b) {
   h += `<div class="card"><div class="card-h"><div><h2>Поставки</h2></div></div><div class="scroll"><table class="grid"><thead><tr><th>Кластер</th><th>По данным Озона</th><th>Статус</th><th>Заявка</th><th class="r">Коробок</th><th class="r">Шт</th><th>Таймслот</th><th>Примечания</th><th></th></tr></thead><tbody>` +
     ships.map((s) => { const cl = s.actual_cluster || s.ozon_cluster_name || s.cluster_name || "—"; return `<tr class="${s.mismatch && !s.cancelled ? "mismatch" : ""} ${s.cancelled ? "dim" : ""}"><td><b>${esc(s.name)}</b></td><td class="small">${esc(cl)}${s.mismatch ? ' <span class="err-text">не тот кластер!</span>' : ""}</td><td>${tag(SST, s.status)}</td><td>${esc(s.order_number || s.order_id || "—")}</td><td class="r">${s.boxes.length}</td><td class="r">${fmt(units(s))}</td><td class="small">${s.slot ? esc(humanSlot(s.slot)) : s.no_slot && s.order_id ? '<span class="warn-text">без таймслота</span>' : "—"}</td>
       <td>${typeof s.verified === "number" ? `<div class="good small">✓ состав подтверждён Озоном</div>` : ""}${s.error ? `<div class="err-text">${esc(s.error)}</div>` : ""}${(s.warn || []).map((w) => `<div class="warn-text">${esc(w)}</div>`).join("")}</td>
-      <td class="r">${!busy && !b.multi && s.order_id && !s.cancelled ? `<button class="btn danger sm" data-cancel="${esc(skey(s))}">Отменить</button>` : ""}${canReplace(s) && b.phase !== "cancelling" ? `<span class="row-acts"><button class="btn soft sm icon-sm" data-retry="${esc(skey(s))}" title="Повторить попытку в этот же кластер" aria-label="Повторить попытку">↻</button><button class="btn soft sm" data-repl="${esc(skey(s))}">Заменить кластер</button></span>` : ""}</td></tr>`; }).join("") + `</tbody></table></div>${b.synced_at ? `<div class="muted small" style="margin-top:8px">Сверено с Озоном ${esc(b.synced_at)}</div>` : ""}</div>`;
+      <td class="r">${!busy && !b.multi && s.order_id && !s.cancelled ? `<button class="btn danger sm" data-cancel="${esc(skey(s))}">Отменить</button>` : ""}${canReplace(s) && b.phase !== "cancelling" ? `<span class="row-acts"><button class="btn soft sm icon-sm" data-retry="${esc(skey(s))}" title="Повторить попытку в этот же кластер" aria-label="Повторить попытку"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg></button><button class="btn soft sm" data-repl="${esc(skey(s))}">Заменить кластер</button></span>` : ""}</td></tr>`; }).join("") + `</tbody></table></div>${b.synced_at ? `<div class="muted small" style="margin-top:8px">Сверено с Озоном ${esc(b.synced_at)}</div>` : ""}</div>`;
 
   h += barcodesCard(b);
   const groups = b.groups || [];
@@ -704,6 +704,14 @@ function renderBatch(b) {
     showBatch(b.id);
   });
   $$("[data-repl]").forEach((el) => (el.onclick = () => askReplace(b, ships.find((x) => skey(x) === el.dataset.repl))));
+  $("#bRename").onclick = async () => {
+    promptBox._v = b.title || "";
+    const ok = await confirmBox(`<h3>Название партии</h3><input id="promptIn" maxlength="120" placeholder="Например: Карты памяти, неделя 48" value="${esc(b.title || "")}"><p class="muted small">Пустое название — снова «Партия от ${esc(b.created)}».</p>`, "Сохранить");
+    const title = (promptBox._v || "").trim(); promptBox._v = "";
+    if (!ok) return;
+    try { await api("/api/batch/rename", { id: b.id, title }); } catch (e) { toast(e.message, true); }
+    showBatch(b.id);
+  };
   $$("[data-retry]").forEach((el) => (el.onclick = async () => {
     el.disabled = true; el.classList.add("spin");
     try { await api("/api/batch/retry", { id: b.id, key: el.dataset.retry }); toast("Пробую ещё раз…"); }

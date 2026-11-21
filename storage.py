@@ -335,7 +335,17 @@ def save_batch(pid, batch):
 
 def load_batch(pid, bid):
     with _lock:
-        return _read(os.path.join(batch_dir(pid, bid), "batch.json"), None)
+        b = _read(os.path.join(batch_dir(pid, bid), "batch.json"), None)
+        t = _read(os.path.join(batch_dir(pid, bid), "title.json"), None)
+        if b is not None and isinstance(t, dict):
+            b["title"] = t.get("title") or ""
+        return b
+
+
+def rename_batch(pid, bid, title):
+    """Название партии — в отдельном файле: создание поставок в это время может сохранять batch.json."""
+    with _lock:
+        _write(os.path.join(batch_dir(pid, bid), "title.json"), {"title": title})
 
 
 def load_labels_done(pid, bid):
