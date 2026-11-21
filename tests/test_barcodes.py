@@ -32,9 +32,17 @@ class Barcodes(unittest.TestCase):
         self.assertEqual(L.check_label_pdf(label), (58, 40))
         plan = L.barcode_plan(batch(), "111")
         out = os.path.join(d, "out.pdf")
-        n = L.build_barcodes(label, plan, out)
-        self.assertEqual(n, 380 + 12)                          # 380 штрихкодов и 12 пустых между городами
-        self.assertEqual(len(PdfReader(out).pages), n)
+        n = L.build_barcodes(label, plan, out, "32 ГБ")
+        self.assertEqual(n, 380 + 13)                          # 380 штрихкодов и 13 информационных этикеток
+        r = PdfReader(out)
+        self.assertEqual(len(r.pages), n)
+        first = r.pages[0].extract_text()                     # файл начинается с информационной этикетки
+        self.assertIn("32 ГБ", first)
+        self.assertIn("20 шт", first)
+        self.assertIn("Город 0", first)
+        self.assertIn("Москва", r.pages[n - 101].extract_text())   # перед последними 100 штрихкодами
+        self.assertEqual(r.pages[n - 1].extract_text().strip(), "")  # в конце — штрихкод, не инфо-этикетка
+        self.assertEqual(round(float(r.pages[0].mediabox.width) / 72 * 25.4), 58)
 
 
 if __name__ == "__main__":
