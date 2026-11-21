@@ -23,5 +23,16 @@ class CurrentShop(unittest.TestCase):
         self.assertEqual(ST.get_profile()["id"], ST.load_profiles()["active"])
 
 
+
+
+class BatchTitle(unittest.TestCase):
+    def test_title_survives_batch_save(self):
+        pid = ST.load_profiles()["profiles"][0]["id"]
+        ST.save_batch(pid, {"id": "b1", "title": "", "shipments": []})
+        ST.rename_batch(pid, "b1", "Карты памяти")
+        ST.save_batch(pid, {"id": "b1", "title": "", "shipments": []})   # создание поставок сохранило старую копию
+        self.assertEqual(ST.load_batch(pid, "b1")["title"], "Карты памяти")
+
+
 if __name__ == "__main__":
     unittest.main()

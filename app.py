@@ -736,6 +736,15 @@ def barcodes_file(bid, sku):
     return out, name
 
 
+def api_batch_rename(b):
+    pid = ST.get_profile()["id"]
+    if not ST.load_batch(pid, b["id"]):
+        raise OzonError("Нет такой партии")
+    title = re.sub(r"\s+", " ", str(b.get("title") or "")).strip()[:120]
+    ST.rename_batch(pid, b["id"], title)
+    return {"title": title}
+
+
 def api_batch_delete(b):
     """Удалить партию из истории — только если в Озоне у неё нет действующих заявок."""
     import shutil
@@ -798,7 +807,7 @@ ROUTES = {
     "/api/batch": api_batch, "/api/batch/slot": api_batch_slot, "/api/batch/resume": api_batch_resume,
     "/api/batch/stop": api_batch_stop, "/api/batch/cancel": api_batch_cancel,
     "/api/batch/rebuild": api_batch_rebuild,
-    "/api/batch/ack": api_batch_ack, "/api/product_label/upload": api_product_label_upload, "/api/batch/label_done": api_batch_label_done, "/api/batch/check_labels": api_batch_check_labels,
+    "/api/batch/ack": api_batch_ack, "/api/batch/rename": api_batch_rename, "/api/product_label/upload": api_product_label_upload, "/api/batch/label_done": api_batch_label_done, "/api/batch/check_labels": api_batch_check_labels,
     "/api/batch/relabel": api_batch_relabel, "/api/batch/replace": api_batch_replace, "/api/batch/retry": api_batch_retry, "/api/batch/delete": api_batch_delete,
     "/api/export": api_export, "/api/import": api_import,
     "/api/legacy/find": api_legacy_find, "/api/legacy/import": api_legacy_import, "/api/batch/sync": api_batch_sync, "/api/open": api_open_folder,
