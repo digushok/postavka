@@ -237,17 +237,65 @@ def check_label_pdf(path):
     return round(float(box.width) / 72 * 25.4), round(float(box.height) / 72 * 25.4)
 
 
-def build_barcodes(label_pdf, plan, out_path):
-    """Этикетка товара (первая страница файла) × количество для каждого города,
-    между городами — одна пустая страница того же размера. Возвращает число страниц."""
+_FONT = None
+
+
+def _font():
+    """Шрифт с кириллицей для информационных этикеток (лежит в программе: fonts/)."""
+    global _FONT
+    if _FONT is None:
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        import sys
+        root = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+        pdfmetrics.registerFont(TTFont("DejaVuBold", os.path.join(root, "fonts", "DejaVuSans-Bold.ttf")))
+        _FONT = "DejaVuBold"
+    return _FONT
+
+
+def info_page(width, height, lines):
+    """Информационная этикетка размером с этикетку товара: строки крупно, по центру.
+    lines — [(текст, доля высоты этикетки)]. Возвращает страницу pypdf."""
+    import io
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    from reportlab.pdfgen import canvas
+    font = _font()
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=(width, height))
+    pad = min(width, height) * 0.07
+    sizes = []
+    for text, share in lines:
+        size = height * share
+        tw = stringWidth(text, font, size)
+        if tw > width - 2 * pad:                   # длинное — уменьшаем, чтобы влезло по ширине
+            size *= (width - 2 * pad) / tw
+        sizes.append(size)
+    gap = height * 0.05
+    total = sum(sizes) + gap * (len(lines) - 1)
+    y = (height + total) / 2
+    for (text, _), size in zip(lines, sizes):
+        y -= size
+        c.setFont(font, size)
+        c.drawCentredString(width / 2, y + size * 0.18, text)
+        y -= gap
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    return PdfReader(buf).pages[0]
+
+
+def build_barcodes(label_pdf, plan, out_path, short=""):
+    """Этикетка товара (первая страница файла) × количество для каждого города.
+    Перед каждым городом — информационная этикетка того же размера: товар коротко, сколько штук, город.
+    Возвращает число страниц."""
     page = PdfReader(label_pdf).pages[0]
     w_, h_ = float(page.mediabox.width), float(page.mediabox.height)
     w = PdfWriter()
     pages = 0
-    for i, (_, q) in enumerate(plan):
-        if i:
-            w.add_blank_page(w_, h_)
-            pages += 1
+    for city, q in plan:
+        w.add_page(info_page(w_, h_, [(short, 0.26), (f"{q} шт", 0.26), (city, 0.17)] if short
+                             else [(f"{q} шт", 0.30), (city, 0.20)]))
+        pages += 1
         for _ in range(q):
             w.add_page(page)
             pages += 1

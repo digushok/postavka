@@ -732,7 +732,7 @@ def barcodes_file(bid, sku):
     p = next((x for x in bt.get("products") or [] if str(x["sku"]) == sku), {})
     name = L.safe_name(f"Штрихкоды — {p.get('short') or p.get('name') or sku} — {sum(q for _, q in plan)} шт") + ".pdf"
     out = os.path.join(ST.batch_dir(pid, bid), "Штрихкоды", name)
-    L.build_barcodes(label, plan, out)
+    L.build_barcodes(label, plan, out, p.get("short") or p.get("name") or sku)
     return out, name
 
 

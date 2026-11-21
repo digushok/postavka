@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY *.py ./
 COPY static ./static
+COPY fonts ./fonts
 
 ENV OZON_SUPPLIES_SERVER=1 \
     OZON_SUPPLIES_DATA=/data \

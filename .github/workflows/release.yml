@@ -48,7 +48,7 @@ jobs:
           exit 0
 
       - name: Сборка
-        run: pyinstaller --noconfirm --onefile --noconsole --name OzonSupplies --icon icon.ico --add-data "static;static" --hidden-import mock_ozon app.py
+        run: pyinstaller --noconfirm --onefile --noconsole --name OzonSupplies --icon icon.ico --add-data "static;static" --add-data "fonts;fonts" --hidden-import mock_ozon app.py
 
       - name: Архив
         shell: pwsh
