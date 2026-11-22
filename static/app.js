@@ -847,15 +847,18 @@ function barcodesCard(b) {
   if (!list.length) return "";
   const done = b.labels_done || {};
   const nDone = list.filter((x) => done["sku:" + x.sku]).length;
-  return `<div class="card"><div class="card-h"><div><h2>Штрихкоды товаров</h2><p class="sub">По каждому товару: перед штрихкодами каждого города — этикетка «товар · сколько штук · город». Города — от меньшего количества к большему.</p></div><div class="actions"><span class="muted small">${nDone === list.length ? '<span class="good">✓ Все наклеены</span>' : `Готово: ${nDone} из ${list.length}`}</span></div></div>
+  return `<div class="card"><div class="card-h"><div><h2>По товарам</h2><p class="sub">Штрихкоды и этикетки грузомест одного товара. Города — от меньшего количества к большему.</p></div><div class="actions"><span class="muted small nowrap">${nDone === list.length ? '<span class="good">✓ Все наклеены</span>' : `Готово: ${nDone} из ${list.length}`}</span></div></div>
     <div class="bc-list">${list.map((x) => {
       const dn = done["sku:" + x.sku];
       return `<div class="bc-row ${dn ? "done" : ""}">
         <div class="bc-n"><b>${esc(x.name)}</b> <span class="muted small">SKU ${esc(x.sku)}${x.offer_id ? " · " + esc(x.offer_id) : ""}</span></div>
         <div class="muted small bc-m">${fmt(x.units)} шт · ${x.cities} ${x.cities === 1 ? "город" : x.cities < 5 ? "города" : "городов"}</div>
         <div class="bc-a">${x.has_label
-          ? `<a class="btn soft sm" target="_blank" href="/barcodes/${encodeURIComponent(b.id)}/${encodeURIComponent(x.sku)}">PDF</a><a class="link small" data-bcup="${esc(x.sku)}" title="Загрузить другую этикетку">заменить</a>`
+          ? `<span class="bc-pair"><a class="btn soft sm" target="_blank" href="/barcodes/${encodeURIComponent(b.id)}/${encodeURIComponent(x.sku)}">Штрихкоды</a><a class="link small" data-bcup="${esc(x.sku)}" title="Загрузить другую этикетку товара">заменить</a></span>`
           : `<button class="btn primary sm" data-bcup="${esc(x.sku)}" title="Скачайте этикетку товара в кабинете Озона и загрузите сюда — один раз для этого товара">Загрузить этикетку</button>`}
+        ${x.cargo
+          ? `<a class="btn soft sm" target="_blank" href="/cargo/${encodeURIComponent(b.id)}/${encodeURIComponent(x.sku)}" title="Этикетки грузомест этого товара из Озона">Грузоместа</a>${x.cargo_missing ? `<span class="warn-text small" title="Этикетки ещё не получены для ${x.cargo_missing} пост.">не все</span>` : ""}`
+          : `<button class="btn soft sm" disabled title="Этикетки грузомест появятся, когда поставки будут созданы">Грузоместа</button>`}
         <label class="done-tg" title="Штрихкоды этого товара наклеены"><input type="checkbox" data-done="sku:${esc(x.sku)}" ${dn ? "checked" : ""}>${dn ? esc(dn.at) : ""}</label></div></div>`;
     }).join("")}</div><input type="file" id="bcFile" accept=".pdf,application/pdf" class="hidden"></div>`;
 }
