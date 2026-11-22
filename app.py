@@ -710,9 +710,11 @@ def _barcodes_view(pid, b):
         plan = L.barcode_plan(b, p["sku"])
         if not plan:
             continue
+        cargo, missing = L.cargo_plan(b, ST.batch_dir(pid, b["id"]), p["sku"]) if b.get("files") else ([], 0)
         out.append({"sku": str(p["sku"]), "name": p.get("short") or p.get("name") or str(p["sku"]),
                     "offer_id": p.get("offer_id"), "units": sum(q for _, q in plan), "cities": len(plan),
-                    "has_label": os.path.isfile(ST.product_label_path(pid, p["sku"]))})
+                    "has_label": os.path.isfile(ST.product_label_path(pid, p["sku"])),
+                    "cargo": bool(cargo), "cargo_missing": missing})
     return out
 
 
@@ -743,6 +745,24 @@ def api_batch_rename(b):
     title = re.sub(r"\s+", " ", str(b.get("title") or "")).strip()[:120]
     ST.rename_batch(pid, b["id"], title)
     return {"title": title}
+
+
+def cargo_file(bid, sku):
+    """Этикетки грузомест одного товара (оригиналы Озона) по городам — как штрихкоды. Возвращает (путь, имя)."""
+    pid = ST.get_profile()["id"]
+    sku = _sku(sku)
+    bt = ST.load_batch(pid, bid)
+    if not bt:
+        raise OzonError("Нет такой партии")
+    bdir = ST.batch_dir(pid, bid)
+    paths, _ = L.cargo_plan(bt, bdir, sku)
+    if not paths:
+        raise OzonError("Этикеток грузомест этого товара пока нет")
+    p = next((x for x in bt.get("products") or [] if str(x["sku"]) == sku), {})
+    name = L.safe_name(f"Грузоместа — {p.get('short') or p.get('name') or sku}") + ".pdf"
+    out = os.path.join(bdir, "Грузоместа по товарам", name)
+    L.merge(paths, out)
+    return out, name
 
 
 def api_batch_delete(b):
@@ -849,10 +869,11 @@ class H(BaseHTTPRequestHandler):
             name = urllib.parse.quote(f"Поставки Ozon — настройки {time.strftime('%Y-%m-%d')}.json")
             return self._send(200, data, "application/json; charset=utf-8",
                               {"Content-Disposition": f"attachment; filename=\"ozon-settings.json\"; filename*=UTF-8''{name}"})
-        if path.startswith("/barcodes/"):
+        if path.startswith(("/barcodes/", "/cargo/")):
             parts = path.split("/")
             try:
-                full, name = barcodes_file(parts[2], parts[3] if len(parts) > 3 else "")
+                fn = barcodes_file if parts[1] == "barcodes" else cargo_file
+                full, name = fn(parts[2] if len(parts) > 2 else "", parts[3] if len(parts) > 3 else "")
             except OzonError as e:
                 return self._send(400, str(e).encode("utf-8"), "text/plain; charset=utf-8")
             with open(full, "rb") as f:

@@ -215,8 +215,8 @@ def verify_outputs(batch, bdir):
 
 
 # ---------------- штрихкоды товаров (этикетка товара из кабинета Озона)
-def barcode_plan(batch, sku):
-    """Сколько штук товара едет в каждый город: [(город, шт)], по возрастанию количества."""
+def _ships_of_sku(batch, sku):
+    """Поставки, в которых есть товар: [(поставка, шт)], по возрастанию количества (при равенстве — как в таблице)."""
     sku = str(sku)
     out = []
     for n, s in enumerate(batch.get("shipments") or []):
@@ -224,8 +224,30 @@ def barcode_plan(batch, sku):
             continue
         q = int((s.get("items") or {}).get(sku) or 0)
         if q > 0:
-            out.append((q, n, s.get("name") or ""))
-    return [(name, q) for q, _, name in sorted(out)]
+            out.append((q, n, s))
+    return [(s, q) for q, _, s in sorted(out, key=lambda x: (x[0], x[1]))]
+
+
+def barcode_plan(batch, sku):
+    """Сколько штук товара едет в каждый город: [(город, шт)], по возрастанию количества."""
+    return [(s.get("name") or "", q) for s, q in _ships_of_sku(batch, sku)]
+
+
+def cargo_plan(batch, bdir, sku):
+    """Этикетки грузомест одного товара — файлы Озона по городам в том же порядке, что и штрихкоды.
+    Возвращает (пути к PDF, сколько поставок ещё без этикеток)."""
+    sku = str(sku)
+    gids = [g["id"] for g in batch.get("groups") or [] if str(g["sku"]) == sku]
+    paths, missing = [], 0
+    for s, _ in _ships_of_sku(batch, sku):
+        mine = [g for g in gids if any(str(b["sku"]) == sku and f"{b['sku']}x{b['qty']}" == g
+                                       for b in s.get("boxes") or [])]
+        have = [os.path.join(bdir, s["labels"][g]) for g in mine if (s.get("labels") or {}).get(g)
+                and os.path.exists(os.path.join(bdir, s["labels"][g]))]
+        if len(have) < len(mine):
+            missing += 1
+        paths += have
+    return paths, missing
 
 
 def check_label_pdf(path):

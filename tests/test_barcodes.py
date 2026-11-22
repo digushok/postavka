@@ -45,5 +45,39 @@ class Barcodes(unittest.TestCase):
         self.assertEqual(round(float(r.pages[0].mediabox.width) / 72 * 25.4), 58)
 
 
+
+
+class CargoBySku(unittest.TestCase):
+    def test_cargo_order_and_missing(self):
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "raw"))
+
+        def pdf(name, pages):
+            w = PdfWriter()
+            for _ in range(pages):
+                w.add_blank_page(200, 300)
+            with open(os.path.join(d, "raw", name), "wb") as f:
+                w.write(f)
+            return f"raw/{name}"
+
+        b = {"groups": [{"id": "111x20", "sku": "111"}, {"id": "111x5", "sku": "111"}, {"id": "222x4", "sku": "222"}],
+             "shipments": [
+                 {"name": "Москва", "items": {"111": 45, "222": 4},
+                  "boxes": [{"sku": "111", "qty": 20}, {"sku": "111", "qty": 20}, {"sku": "111", "qty": 5}, {"sku": "222", "qty": 4}],
+                  "labels": {"111x20": pdf("m20.pdf", 2), "111x5": pdf("m5.pdf", 1), "222x4": pdf("m4.pdf", 1)}},
+                 {"name": "Казань", "items": {"111": 20}, "boxes": [{"sku": "111", "qty": 20}],
+                  "labels": {"111x20": pdf("k20.pdf", 1)}},
+                 {"name": "Уфа", "items": {"111": 25}, "boxes": [{"sku": "111", "qty": 20}, {"sku": "111", "qty": 5}],
+                  "labels": {"111x20": pdf("u20.pdf", 1)}},           # этикетку 111x5 ещё не получили
+                 {"name": "Отменён", "items": {"111": 1}, "cancelled": True, "boxes": [{"sku": "111", "qty": 1}]},
+             ]}
+        paths, missing = L.cargo_plan(b, d, "111")
+        self.assertEqual([os.path.basename(p) for p in paths], ["k20.pdf", "u20.pdf", "m20.pdf", "m5.pdf"])
+        self.assertEqual(missing, 1)
+        out = os.path.join(d, "out.pdf")
+        self.assertEqual(L.merge(paths, out), 5)
+        self.assertEqual([os.path.basename(p) for p in L.cargo_plan(b, d, "222")[0]], ["m4.pdf"])
+
+
 if __name__ == "__main__":
     unittest.main()
