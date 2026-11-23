@@ -45,6 +45,10 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
+          # кеш слоёв: системные пакеты и библиотеки пересобираются, только когда меняются,
+          # и серверу при обновлении достаётся скачать лишь слой с кодом (меньше 1 МБ)
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: |
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ env.VERSION }}

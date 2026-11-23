@@ -1007,11 +1007,26 @@ def serve_server_mode(port):
     global SERVER
     SERVER = ThreadingHTTPServer((host, port), H)
     SERVER.daemon_threads = True
+    _stop_on_sigterm()
     print(f"Поставки Ozon {VERSION} (сервер) слушают http://{host}:{port}/, данные: {ST.DATA}", flush=True)
     try:
         SERVER.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        SERVER.server_close()
+        print("Остановлена", flush=True)
+
+
+def _stop_on_sigterm():
+    """Docker останавливает контейнер сигналом SIGTERM. Python в роли главного процесса контейнера
+    его не обрабатывает — Docker ждал 10 секунд и убивал программу. Теперь она завершается сразу:
+    serve_forever прерывается, файлы данных пишутся атомарно (через .tmp), поэтому не портятся."""
+    import signal
+
+    def stop(*_):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, stop)
 
 
 def main():
