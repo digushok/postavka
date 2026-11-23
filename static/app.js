@@ -901,8 +901,10 @@ function barcodesCard(b) {
       const dn = done["sku:" + x.sku];
       return `<div class="bc-row ${dn ? "done" : ""}">
         <div class="bc-n"><b>${esc(x.name)}</b> <span class="muted small">SKU ${esc(x.sku)}${x.offer_id ? " · " + esc(x.offer_id) : ""}</span></div>
-        <div class="muted small bc-m">${fmt(x.units)} шт · ${x.cities} ${x.cities === 1 ? "город" : x.cities < 5 ? "города" : "городов"}</div>
-        <div class="bc-a">${x.has_label
+        <div class="muted small bc-m">${fmt(x.units)} шт · ${x.cities} ${x.cities % 10 === 1 && x.cities % 100 !== 11 ? "город" : [2, 3, 4].includes(x.cities % 10) && ![12, 13, 14].includes(x.cities % 100) ? "города" : "городов"}${(x.failed || []).length ? `<div class="warn-text" title="Озон не принял заявку — в файлы не входит. После повтора (↻) или замены кластера город вернётся">без: ${x.failed.map(esc).join(", ")} — заявка не создана</div>` : ""}</div>
+        <div class="bc-a">${x.has_label && !x.cities
+          ? `<button class="btn soft sm" disabled title="Ни одна заявка с этим товаром не создана">Штрихкоды</button>`
+          : x.has_label
           ? `<span class="bc-pair"><a class="btn soft sm" target="_blank" href="/barcodes/${encodeURIComponent(b.id)}/${encodeURIComponent(x.sku)}">Штрихкоды</a><a class="link small" data-bcup="${esc(x.sku)}" title="Загрузить другую этикетку товара">заменить</a></span>`
           : `<button class="btn primary sm" data-bcup="${esc(x.sku)}" title="Скачайте этикетку товара в кабинете Озона и загрузите сюда — один раз для этого товара">Загрузить этикетку</button>`}
         ${x.cargo

@@ -21,6 +21,15 @@ class Barcodes(unittest.TestCase):
         self.assertEqual(plan[0][0], "Город 0")
         self.assertEqual(L.barcode_plan(batch(), "222"), [("Казань", 5)])
 
+    def test_failed_city_excluded(self):
+        b = batch()
+        b["shipments"][10].update(status="error")                       # Казань: Озон не принял заявку
+        self.assertNotIn("Казань", [c for c, _ in L.barcode_plan(b, "111")])
+        self.assertEqual(L.failed_cities(b, "111"), ["Казань"])
+        self.assertEqual(L.barcode_plan(b, "222"), [])
+        b["shipments"][10].update(status="done", order_id=7)            # после повтора — снова в файле
+        self.assertIn("Казань", [c for c, _ in L.barcode_plan(b, "111")])
+
     def test_pdf_pages_and_blanks(self):
         d = tempfile.mkdtemp()
         label = os.path.join(d, "label.pdf")
