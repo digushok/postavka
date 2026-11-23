@@ -31,7 +31,14 @@
 
     <div class="card">
       <div class="card-h"><span class="step">1</span><div><h2>Товары закупки</h2><p class="sub">SKU Ozon и сколько штук закуплено</p></div>
-        <div class="actions"><button class="btn soft" id="pasteBtn">Вставить из Excel</button><button class="btn soft" id="addProd">+ Товар</button></div>
+        <div class="actions"><button class="btn soft" id="mxBtn" title="Загрузить готовую таблицу: кластеры × SKU × количество">Импорт таблицы</button><button class="btn soft" id="pasteBtn">Вставить из Excel</button><button class="btn soft" id="addProd">+ Товар</button></div>
+      </div>
+      <div id="mxBox" class="paste hidden">
+        <div class="mx-row">
+          <div class="muted small">Готовая таблица Excel: строки — кластеры, столбцы — SKU, в ячейках — сколько штук в кластер. Заполнит товары и распределение целиком.</div>
+          <div class="row"><button class="btn primary sm" id="mxPick">Выбрать файл…</button><button class="btn soft sm" id="mxTpl">Скачать шаблон</button><button class="btn ghost sm" id="mxClose">Закрыть</button></div>
+        </div>
+        <input type="file" id="mxFile" accept=".xlsx,.csv,.txt,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" class="hidden">
       </div>
       <div id="pasteBox" class="paste hidden">
         <textarea id="pasteText" rows="5" placeholder="Скопируйте из Excel два столбца — SKU и количество. Каждый товар с новой строки."></textarea>

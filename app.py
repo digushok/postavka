@@ -765,6 +765,41 @@ def cargo_file(bid, sku):
     return out, name
 
 
+def matrix_template(b):
+    """Шаблон Excel «кластеры × SKU» с текущими товарами и кластерами из формы. Возвращает (данные, имя)."""
+    import xlsx as X
+    saved = ST.get_profile().get("products") or {}
+    prods = []
+    for p in b.get("products") or []:
+        sku = str(p.get("sku") or "").strip()
+        if not sku:
+            continue
+        s = saved.get(sku, {})
+        prods.append({"sku": sku, "name": p.get("short") or s.get("short") or p.get("name") or s.get("name") or "",
+                      "box_size": p.get("box_size") or s.get("box_size")})
+    data = X.build_template(prods, [str(c) for c in b.get("clusters") or [] if c],
+                            [str(c) for c in b.get("all_clusters") or [] if c])
+    return data, f"Поставки Ozon — шаблон распределения {time.strftime('%Y-%m-%d')}.xlsx"
+
+
+def api_matrix_import(b):
+    """Заполненная таблица Excel (.xlsx или .csv) → товары и количества по кластерам."""
+    import base64
+    import xlsx as X
+    try:
+        data = base64.b64decode(b.get("data") or "")
+    except Exception:
+        raise OzonError("Не удалось прочитать файл")
+    if len(data) > 10 * 1024 * 1024:
+        raise OzonError("Файл больше 10 МБ")
+    try:
+        return X.read_table(b.get("name") or "", data)
+    except X.TableError as e:
+        raise OzonError(str(e))
+    except Exception as e:
+        raise OzonError(f"Не удалось прочитать таблицу: {e}")
+
+
 def api_batch_delete(b):
     """Удалить партию из истории — только если в Озоне у неё нет действующих заявок."""
     import shutil
@@ -827,7 +862,7 @@ ROUTES = {
     "/api/batch": api_batch, "/api/batch/slot": api_batch_slot, "/api/batch/resume": api_batch_resume,
     "/api/batch/stop": api_batch_stop, "/api/batch/cancel": api_batch_cancel,
     "/api/batch/rebuild": api_batch_rebuild,
-    "/api/batch/ack": api_batch_ack, "/api/batch/rename": api_batch_rename, "/api/product_label/upload": api_product_label_upload, "/api/batch/label_done": api_batch_label_done, "/api/batch/check_labels": api_batch_check_labels,
+    "/api/batch/ack": api_batch_ack, "/api/matrix/import": api_matrix_import, "/api/batch/rename": api_batch_rename, "/api/product_label/upload": api_product_label_upload, "/api/batch/label_done": api_batch_label_done, "/api/batch/check_labels": api_batch_check_labels,
     "/api/batch/relabel": api_batch_relabel, "/api/batch/replace": api_batch_replace, "/api/batch/retry": api_batch_retry, "/api/batch/delete": api_batch_delete,
     "/api/export": api_export, "/api/import": api_import,
     "/api/legacy/find": api_legacy_find, "/api/legacy/import": api_legacy_import, "/api/batch/sync": api_batch_sync, "/api/open": api_open_folder,
@@ -869,6 +904,14 @@ class H(BaseHTTPRequestHandler):
             name = urllib.parse.quote(f"Поставки Ozon — настройки {time.strftime('%Y-%m-%d')}.json")
             return self._send(200, data, "application/json; charset=utf-8",
                               {"Content-Disposition": f"attachment; filename=\"ozon-settings.json\"; filename*=UTF-8''{name}"})
+        if path == "/matrix-template.xlsx":
+            try:
+                q = urllib.parse.parse_qs(u.query).get("d", ["{}"])[0]
+                data, name = matrix_template(json.loads(q))
+            except Exception as e:
+                return self._send(400, f"Не удалось собрать шаблон: {e}".encode("utf-8"), "text/plain; charset=utf-8")
+            return self._send(200, data, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                              {"Content-Disposition": f"attachment; filename=\"template.xlsx\"; filename*=UTF-8''{urllib.parse.quote(name)}"})
         if path.startswith(("/barcodes/", "/cargo/")):
             parts = path.split("/")
             try:
