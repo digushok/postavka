@@ -343,6 +343,7 @@ def _stamp_qty(page, qty):
     buf.seek(0)
     over = PdfReader(buf).pages[0]
     from pypdf import Transformation
+    page = PdfWriter().add_page(page)             # pypdf 7: дорисовывать можно только на странице в файле
     page.merge_transformed_page(over, Transformation().translate(float(box.left), float(box.bottom)))
     return page
 
