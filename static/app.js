@@ -896,7 +896,7 @@ function barcodesCard(b) {
   if (!list.length) return "";
   const done = b.labels_done || {};
   const nDone = list.filter((x) => done["sku:" + x.sku]).length;
-  return `<div class="card"><div class="card-h"><div><h2>По товарам</h2><p class="sub">Штрихкоды и этикетки грузомест одного товара. Страницы в обратном порядке: в начале файла — город с самым большим количеством.</p></div><div class="actions"><span class="muted small nowrap">${nDone === list.length ? '<span class="good">✓ Все наклеены</span>' : `Готово: ${nDone} из ${list.length}`}</span></div></div>
+  return `<div class="card"><div class="card-h"><div><h2>По товарам</h2><p class="sub">Штрихкоды и этикетки грузомест одного товара. Страницы в обратном порядке и перевёрнуты: в начале файла — город с самым большим количеством.</p></div><div class="actions"><span class="muted small nowrap">${nDone === list.length ? '<span class="good">✓ Все наклеены</span>' : `Готово: ${nDone} из ${list.length}`}</span></div></div>
     <div class="bc-list">${list.map((x) => {
       const dn = done["sku:" + x.sku];
       return `<div class="bc-row ${dn ? "done" : ""}">
