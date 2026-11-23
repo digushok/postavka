@@ -83,15 +83,18 @@ class CargoBySku(unittest.TestCase):
                  {"name": "Отменён", "items": {"111": 1}, "cancelled": True, "boxes": [{"sku": "111", "qty": 1}]},
              ]}
         paths, missing = L.cargo_plan(b, d, "111")
-        self.assertEqual([os.path.basename(p) for p in paths], ["k20.pdf", "u20.pdf", "m20.pdf", "m5.pdf"])
+        self.assertEqual([(os.path.basename(p), q) for p, q in paths],
+                         [("k20.pdf", 20), ("u20.pdf", 20), ("m20.pdf", 20), ("m5.pdf", 5)])
         self.assertEqual(missing, 1)
         out = os.path.join(d, "out.pdf")
         self.assertEqual(L.build_cargo(paths, out, "32 ГБ"), 6)          # информационный лист + 5 этикеток
         r = PdfReader(out)
         self.assertIn("32 ГБ", r.pages[5].extract_text())                 # порядок обратный — лист последний
         self.assertTrue(all(pg.rotation == 180 for pg in r.pages))
+        qty = [pg.extract_text().strip() for pg in r.pages[:5]][::-1]    # обратно к прямому порядку
+        self.assertEqual(qty, ["20 шт", "20 шт", "20 шт", "20 шт", "5 шт"])
         self.assertEqual((float(r.pages[5].mediabox.width), float(r.pages[5].mediabox.height)), (200.0, 300.0))
-        self.assertEqual([os.path.basename(p) for p in L.cargo_plan(b, d, "222")[0]], ["m4.pdf"])
+        self.assertEqual([(os.path.basename(p), q) for p, q in L.cargo_plan(b, d, "222")[0]], [("m4.pdf", 4)])
 
 
 if __name__ == "__main__":

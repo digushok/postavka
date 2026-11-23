@@ -249,15 +249,15 @@ def barcode_plan(batch, sku):
 
 def cargo_plan(batch, bdir, sku):
     """Этикетки грузомест одного товара — файлы Озона по городам в том же порядке, что и штрихкоды.
-    Возвращает (пути к PDF, сколько поставок ещё без этикеток)."""
+    Возвращает ([(путь к PDF, штук товара в каждом грузоместе этого файла)], сколько поставок ещё без этикеток)."""
     sku = str(sku)
     gids = [g["id"] for g in batch.get("groups") or [] if str(g["sku"]) == sku]
     paths, missing = [], 0
     for s, _ in _ships_of_sku(batch, sku):
         mine = [g for g in gids if any(str(b["sku"]) == sku and f"{b['sku']}x{b['qty']}" == g
                                        for b in s.get("boxes") or [])]
-        have = [os.path.join(bdir, s["labels"][g]) for g in mine if (s.get("labels") or {}).get(g)
-                and os.path.exists(os.path.join(bdir, s["labels"][g]))]
+        have = [(os.path.join(bdir, s["labels"][g]), int(g.rsplit("x", 1)[1])) for g in mine
+                if (s.get("labels") or {}).get(g) and os.path.exists(os.path.join(bdir, s["labels"][g]))]
         if len(have) < len(mine):
             missing += 1
         paths += have
@@ -320,6 +320,33 @@ def info_page(width, height, lines):
     return PdfReader(buf).pages[0]
 
 
+def _stamp_qty(page, qty):
+    """Дописывает «32 шт» на свободное место этикетки грузоместа Озона — справа от ID грузового места
+    (у всех этикеток Озона одна раскладка 120×75 мм, координаты — доли размера страницы)."""
+    import io
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    from reportlab.pdfgen import canvas
+    font = _font()
+    box = page.mediabox
+    w, h = float(box.width), float(box.height)
+    text = f"{qty} шт"
+    size = h * 0.105
+    room = w * 0.32                                   # от «000» в ID грузоместа до рамки со штрихкодом
+    if stringWidth(text, font, size) > room:
+        size *= room / stringWidth(text, font, size)
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=(w, h))
+    c.setFont(font, size)
+    c.drawRightString(w * 0.825, h * 0.185, text)
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    over = PdfReader(buf).pages[0]
+    from pypdf import Transformation
+    page.merge_transformed_page(over, Transformation().translate(float(box.left), float(box.bottom)))
+    return page
+
+
 def _write_reversed(pages, out_path):
     """Страницы в обратном порядке (первая — последней, вторая — предпоследней и т. д.),
     каждая повёрнута на 180° — вверх ногами."""
@@ -334,13 +361,15 @@ def _write_reversed(pages, out_path):
     return len(pages)
 
 
-def build_cargo(paths, out_path, short):
+def build_cargo(items, out_path, short):
     """Этикетки грузомест одного товара: информационный лист с коротким именем товара
-    (размером с этикетку грузоместа) и оригинальные этикетки Озона. Порядок страниц обратный:
+    (размером с этикетку грузоместа) и этикетки Озона, на каждой дописано, сколько штук в грузоместе.
+    items — [(путь к PDF, штук в грузоместе)]. Порядок страниц обратный:
     в файле сначала последний город, информационный лист — последней страницей. Возвращает число страниц."""
     pages = []
-    for p in paths:
+    for p, qty in items:
         for page in PdfReader(p).pages:
+            page = _stamp_qty(page, qty)
             if not pages:
                 box = page.mediabox
                 pages.append(info_page(float(box.width), float(box.height), [(short, 0.16)]))
