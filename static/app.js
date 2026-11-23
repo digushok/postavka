@@ -199,6 +199,54 @@ async function lookup(list) {
   saveDraft(); renderProducts(); replan();
 }
 
+/* ---- импорт готовой таблицы «кластеры × SKU» из Excel ---- */
+$("#mxBtn").onclick = () => $("#mxBox").classList.toggle("hidden");
+$("#mxClose").onclick = () => $("#mxBox").classList.add("hidden");
+$("#mxTpl").onclick = async () => {
+  try {
+    if (!APP.clusters) await loadClusters();
+    const d = {
+      products: prodsOf().map((p) => ({ sku: p.sku, name: p.name, short: p.short, box_size: p.box_size })),
+      clusters: D.rows.map((r) => rowName(r) || r.match).filter(Boolean),
+      all_clusters: (APP.clusters || []).map((c) => c.name).sort((a, b) => a.localeCompare(b, "ru")),
+    };
+    const a = document.createElement("a");
+    a.href = "/matrix-template.xlsx?d=" + encodeURIComponent(JSON.stringify(d));
+    document.body.appendChild(a); a.click(); a.remove();
+    toast("Шаблон сохранён в «Загрузки»: в нём ваши товары и кластеры");
+  } catch (e) { toast(e.message, true); }
+};
+$("#mxPick").onclick = () => $("#mxFile").click();
+$("#mxFile").onchange = async (e) => {
+  const f = e.target.files[0]; e.target.value = "";
+  if (!f) return;
+  try {
+    const data = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(",")[1] || ""); r.onerror = rej; r.readAsDataURL(f); });
+    const t = await api("/api/matrix/import", { name: f.name, data });
+    if (!APP.clusters) await loadClusters();
+    const miss = t.rows.filter((r) => !findCluster(r.name)).map((r) => r.name);
+    const units = t.products.reduce((a, p) => a + p.qty, 0);
+    const ok = await confirmBox(`<h3>Заполнить из таблицы?</h3><p>Товаров: <b>${t.products.length}</b>, кластеров: <b>${t.rows.length}</b>, всего <b>${fmt(units)}</b> шт. Текущие товары и распределение в форме будут заменены.</p>`
+      + (miss.length ? `<p class="warn-text">Не найдены в Озоне: ${miss.map(esc).join(", ")}. Эти строки останутся в таблице с пометкой — поправьте название в файле или выберите кластер вручную.</p>` : "")
+      + (t.skipped.length ? `<p class="muted small">Пропущено: ${t.skipped.map(esc).join("; ")}</p>` : ""), "Заполнить");
+    if (!ok) return;
+    const saved = APP.profile.products || {};
+    D.products = t.products.map((p) => { const s = saved[p.sku] || {}; return { sku: p.sku, qty: p.qty, name: s.name || "", short: s.short || "", box_size: p.box_size || s.box_size || null, multiple: !!s.multiple }; });
+    D.rows = t.rows.map((r) => {
+      const hit = findCluster(r.name);
+      const total = Object.values(r.cells).reduce((a, v) => a + v, 0);
+      return { cluster_id: hit ? hit.id : null, cluster_name: hit ? hit.name : null, match: r.name, fixed: { ...r.cells },
+               share: units ? Math.round(total / units * 1000) / 10 : 0 };
+    });
+    // доли округлены до десятых — остаток округления отдаём самому крупному кластеру, чтобы сумма была 100%
+    const top = [...D.rows].sort((x, y) => y.share - x.share)[0];
+    if (top) top.share = Math.round((top.share + 100 - D.rows.reduce((a, r) => a + r.share, 0)) * 10) / 10;
+    D.mode = "share";
+    saveDraft(); $("#mxBox").classList.add("hidden"); renderNew(); await lookup(D.products);
+    toast(miss.length ? `Таблица загружена. Не найдено кластеров: ${miss.length}` : "Таблица загружена", !!miss.length);
+  } catch (err) { toast(err.message, true); }
+};
+
 $("#pasteBtn").onclick = () => { $("#pasteBox").classList.toggle("hidden"); $("#pasteText").focus(); };
 $("#pasteCancel").onclick = () => $("#pasteBox").classList.add("hidden");
 $("#pasteApply").onclick = async () => {

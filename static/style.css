@@ -358,3 +358,7 @@ body.server #bFolder, body.server #bLabelsFolder { display: none !important; }
 .bc-pair { display: inline-flex; align-items: center; gap: 8px; }
 .bc-a .btn[disabled] { opacity: .45; cursor: default; }
 .nowrap { white-space: nowrap; }
+
+/* импорт таблицы из Excel */
+.mx-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.mx-row .row { margin: 0; }
