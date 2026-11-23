@@ -762,7 +762,7 @@ def cargo_file(bid, sku):
     p = next((x for x in bt.get("products") or [] if str(x["sku"]) == sku), {})
     name = L.safe_name(f"Грузоместа — {p.get('short') or p.get('name') or sku}") + ".pdf"
     out = os.path.join(bdir, "Грузоместа по товарам", name)
-    L.merge(paths, out)
+    L.build_cargo(paths, out, p.get("short") or p.get("name") or sku)
     return out, name
 
 
