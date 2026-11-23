@@ -45,12 +45,13 @@ class Barcodes(unittest.TestCase):
         self.assertEqual(n, 380 + 13)                          # 380 штрихкодов и 13 информационных этикеток
         r = PdfReader(out)
         self.assertEqual(len(r.pages), n)
-        first = r.pages[0].extract_text()                     # файл начинается с информационной этикетки
-        self.assertIn("32 ГБ", first)
-        self.assertIn("20 шт", first)
-        self.assertIn("Город 0", first)
-        self.assertIn("Москва", r.pages[n - 101].extract_text())   # перед последними 100 штрихкодами
-        self.assertEqual(r.pages[n - 1].extract_text().strip(), "")  # в конце — штрихкод, не инфо-этикетка
+        # порядок обратный: файл кончается информационной этикеткой первого (самого маленького) города
+        last = r.pages[n - 1].extract_text()
+        self.assertIn("32 ГБ", last)
+        self.assertIn("20 шт", last)
+        self.assertIn("Город 0", last)
+        self.assertEqual(r.pages[0].extract_text().strip(), "")     # в начале — штрихкоды Москвы
+        self.assertIn("Москва", r.pages[100].extract_text())        # после 100 штрихкодов Москвы — её этикетка
         self.assertEqual(round(float(r.pages[0].mediabox.width) / 72 * 25.4), 58)
 
 
@@ -86,8 +87,8 @@ class CargoBySku(unittest.TestCase):
         out = os.path.join(d, "out.pdf")
         self.assertEqual(L.build_cargo(paths, out, "32 ГБ"), 6)          # информационный лист + 5 этикеток
         r = PdfReader(out)
-        self.assertIn("32 ГБ", r.pages[0].extract_text())
-        self.assertEqual((float(r.pages[0].mediabox.width), float(r.pages[0].mediabox.height)), (200.0, 300.0))
+        self.assertIn("32 ГБ", r.pages[5].extract_text())                 # порядок обратный — лист последний
+        self.assertEqual((float(r.pages[5].mediabox.width), float(r.pages[5].mediabox.height)), (200.0, 300.0))
         self.assertEqual([os.path.basename(p) for p in L.cargo_plan(b, d, "222")[0]], ["m4.pdf"])
 
 
