@@ -708,13 +708,14 @@ def _barcodes_view(pid, b):
     out = []
     for p in b.get("products") or []:
         plan = L.barcode_plan(b, p["sku"])
-        if not plan:
+        if not plan and not L.failed_cities(b, p["sku"]):
             continue
         cargo, missing = L.cargo_plan(b, ST.batch_dir(pid, b["id"]), p["sku"]) if b.get("files") else ([], 0)
         out.append({"sku": str(p["sku"]), "name": p.get("short") or p.get("name") or str(p["sku"]),
                     "offer_id": p.get("offer_id"), "units": sum(q for _, q in plan), "cities": len(plan),
                     "has_label": os.path.isfile(ST.product_label_path(pid, p["sku"])),
-                    "cargo": bool(cargo), "cargo_missing": missing})
+                    "cargo": bool(cargo), "cargo_missing": missing,
+                    "failed": L.failed_cities(b, p["sku"])})
     return out
 
 

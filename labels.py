@@ -215,12 +215,26 @@ def verify_outputs(batch, bdir):
 
 
 # ---------------- штрихкоды товаров (этикетка товара из кабинета Озона)
+def _failed(s):
+    """Заявку создать не удалось (Озон отказал) — пока её не повторили или не заменили кластер, город не едет."""
+    return not s.get("order_id") and (s.get("status") == "error" or s.get("excluded"))
+
+
+def failed_cities(batch, sku):
+    """Города с этим товаром, исключённые из файлов, потому что заявка не создана."""
+    sku = str(sku)
+    return [s.get("name") or "" for s in batch.get("shipments") or []
+            if not s.get("cancelled") and _failed(s) and int((s.get("items") or {}).get(sku) or 0) > 0]
+
+
 def _ships_of_sku(batch, sku):
-    """Поставки, в которых есть товар: [(поставка, шт)], по возрастанию количества (при равенстве — как в таблице)."""
+    """Поставки, в которых есть товар: [(поставка, шт)], по возрастанию количества (при равенстве — как в таблице).
+    Отменённые и те, заявку по которым создать не удалось, не входят — иначе штрихкоды напечатаются для города,
+    куда товар не едет, и порядок пачек разойдётся с этикетками грузомест."""
     sku = str(sku)
     out = []
     for n, s in enumerate(batch.get("shipments") or []):
-        if s.get("cancelled"):
+        if s.get("cancelled") or _failed(s):
             continue
         q = int((s.get("items") or {}).get(sku) or 0)
         if q > 0:
