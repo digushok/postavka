@@ -908,7 +908,7 @@ function barcodesCard(b) {
           ? `<span class="bc-pair"><a class="btn soft sm" target="_blank" href="/barcodes/${encodeURIComponent(b.id)}/${encodeURIComponent(x.sku)}">Штрихкоды</a><a class="link small" data-bcup="${esc(x.sku)}" title="Загрузить другую этикетку товара">заменить</a></span>`
           : `<button class="btn primary sm" data-bcup="${esc(x.sku)}" title="Скачайте этикетку товара в кабинете Озона и загрузите сюда — один раз для этого товара">Загрузить этикетку</button>`}
         ${x.cargo
-          ? `<a class="btn soft sm" target="_blank" href="/cargo/${encodeURIComponent(b.id)}/${encodeURIComponent(x.sku)}" title="Этикетки грузомест этого товара из Озона">Грузоместа</a>${x.cargo_missing ? `<span class="warn-text small" title="Этикетки ещё не получены для ${x.cargo_missing} пост.">не все</span>` : ""}`
+          ? `<a class="btn soft sm" target="_blank" href="/cargo/${encodeURIComponent(b.id)}/${encodeURIComponent(x.sku)}" title="Этикетки грузомест этого товара из Озона, на каждой — сколько в ней штук">Грузоместа</a>${x.cargo_missing ? `<span class="warn-text small" title="Этикетки ещё не получены для ${x.cargo_missing} пост.">не все</span>` : ""}`
           : `<button class="btn soft sm" disabled title="Этикетки грузомест появятся, когда поставки будут созданы">Грузоместа</button>`}
         <label class="done-tg" title="Штрихкоды этого товара наклеены"><input type="checkbox" data-done="sku:${esc(x.sku)}" ${dn ? "checked" : ""}>${dn ? esc(dn.at) : ""}</label></div></div>`;
     }).join("")}</div><input type="file" id="bcFile" accept=".pdf,application/pdf" class="hidden"></div>`;
