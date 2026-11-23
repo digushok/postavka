@@ -109,14 +109,9 @@ select { cursor: pointer; }
 .matrix td input.off { background: var(--warn-soft); box-shadow: inset 0 0 0 1px #f0d9a8; }
 .matrix td input.share { width: 70px; font-weight: 600; color: var(--ink); background: var(--field); }
 .matrix td input.share:focus { background: #fff; }
-.matrix td input.kitn { width: 56px; font-weight: 600; color: var(--accent); }
 .matrix .ro { color: var(--ink2); padding-right: 10px; }
-.matrix th.kit, .matrix td.kitc { background: #fbfaff; }
 .matrix .manual { font-size: 11px; color: var(--warn); cursor: pointer; margin-left: 6px; }
-.matrix .dev { font-size: 11px; margin-left: 4px; }
 .matrix tfoot input { width: 78px; text-align: right; font-weight: 600; }
-.kits { margin-top: 18px; padding-top: 14px; border-top: 1px dashed var(--line); }
-.kits .card-h h2 { font-size: 15px; }
 
 /* режим заявок */
 .modes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
