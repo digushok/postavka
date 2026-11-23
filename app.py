@@ -365,56 +365,27 @@ def _plan_products(b):
             for x in b.get("products") or [] if str(x.get("sku") or "").strip()]
 
 
-def _clean_kits(kits, products):
-    """Наборы из интерфейса → {defs, alloc} с целыми числами."""
-    skus = [p["sku"] for p in products]
-    defs = [{"id": str(d["id"]), "items": {s: max(0, int((d.get("items") or {}).get(s) or 0)) for s in skus}}
-            for d in (kits or {}).get("defs") or []]
-    ids = {d["id"] for d in defs}
-    alloc = {str(c): {k: max(0, int(n or 0)) for k, n in (v or {}).items() if k in ids}
-             for c, v in ((kits or {}).get("alloc") or {}).items()}
-    return defs, alloc
-
-
 def api_plan(b):
     """Расчёт таблицы «Новая поставка»: количество по кластерам и грузоместа.
 
-    mode = "share": количество из долей; строки с ручными количествами (fixed) берутся как есть.
-    mode = "kits":  количество из наборов (сколько наборов каждого вида у кластера)."""
+    Количество из долей; строки с ручными количествами (fixed) берутся как есть."""
     products = _plan_products(b)
     rows = [{"cluster_id": str(r["key"]), "share": r.get("share") or 0, "name": r.get("name"),
              "fixed": r.get("fixed")} for r in b.get("rows") or []]
     order = [r["cluster_id"] for r in rows]
     names = {r["cluster_id"]: r["name"] for r in rows}
-    if b.get("mode") == "kits":
-        defs, alloc = _clean_kits(b.get("kits"), products)
-        alloc = {c: alloc.get(c, {}) for c in order}
-        matrix = P.kits_matrix(defs, alloc, products)
-        boxes = P.build_boxes_kits(defs, alloc, products, order)
-        calc, unassigned = matrix, {}
-    else:
-        rem = b.get("remainder_city")
-        calc, unassigned = P.distribute(products, rows, b.get("method") or P.METHOD_REMAINDER_CITY,
-                                        None if rem in (None, "", "largest") else rem)
-        matrix = {}
-        for r in rows:
-            fixed = r.get("fixed")
-            matrix[r["cluster_id"]] = ({p["sku"]: max(0, int((fixed or {}).get(p["sku"]) or 0)) for p in products}
-                                       if fixed else calc[r["cluster_id"]])
-        boxes = P.build_boxes(matrix, products, order)
+    rem = b.get("remainder_city")
+    calc, unassigned = P.distribute(products, rows, b.get("method") or P.METHOD_REMAINDER_CITY,
+                                    None if rem in (None, "", "largest") else rem)
+    matrix = {}
+    for r in rows:
+        fixed = r.get("fixed")
+        matrix[r["cluster_id"]] = ({p["sku"]: max(0, int((fixed or {}).get(p["sku"]) or 0)) for p in products}
+                                   if fixed else calc[r["cluster_id"]])
+    boxes = P.build_boxes(matrix, products, order)
     groups = P.group_boxes(boxes, products, order, names)
     return {"matrix": matrix, "calc": calc, "unassigned": unassigned, "groups": groups,
             "boxes": {k: len(v) for k, v in boxes.items()}}
-
-
-def api_kits_auto(b):
-    """Автоподбор наборов из долей (шаг 2,5%, большой набор = 2 шага, остаток — набор В)."""
-    products = _plan_products(b)
-    rows = [{"cluster_id": str(r["key"]), "share": r.get("share") or 0} for r in b.get("rows") or []]
-    rem = b.get("remainder_city")
-    res = P.auto_kits(products, rows, step=float(b.get("step") or 2.5), big_steps=int(b.get("big_steps") or 2),
-                      remainder_cluster=None if rem in (None, "", "largest") else rem)
-    return res
 
 
 def api_batch_create(b):
@@ -449,16 +420,8 @@ def api_batch_create(b):
         raise OzonError("Выберите точку отгрузки")
     cities = [c for c in b["cities"] if c.get("cluster_id")]
     order = [str(c["cluster_id"]) for c in cities]
-    kits = None
-    if b.get("dist") == "kits":
-        defs, alloc = _clean_kits(b.get("kits"), products)
-        alloc = {c: alloc.get(c, {}) for c in order}
-        matrix = P.kits_matrix(defs, alloc, products)
-        boxes = P.build_boxes_kits(defs, alloc, products, order)
-        kits = {"defs": defs, "alloc": alloc}
-    else:
-        matrix = {str(k): {str(s): int(q or 0) for s, q in v.items()} for k, v in b["matrix"].items()}
-        boxes = P.build_boxes(matrix, products, order)
+    matrix = {str(k): {str(s): int(q or 0) for s, q in v.items()} for k, v in b["matrix"].items()}
+    boxes = P.build_boxes(matrix, products, order)
     shipments = []
     for c in cities:
         cid = str(c["cluster_id"])
@@ -488,7 +451,7 @@ def api_batch_create(b):
         "groups": P.group_boxes({s["cluster_id"]: s["boxes"] for s in shipments}, products,
                                 [s["cluster_id"] for s in shipments], names),
         "log": [], "files": None, "demo": bool(p.get("demo")),
-        "source": b.get("source"), "kits": kits,
+        "source": b.get("source"),
     }
     os.makedirs(ST.batch_dir(p["id"], bid), exist_ok=True)
     ST.save_batch(p["id"], batch)
@@ -859,7 +822,7 @@ ROUTES = {
     "/api/profile/select": api_profile_select, "/api/profile/delete": api_profile_delete,
     "/api/check": api_check, "/api/clusters": api_clusters, "/api/dropoff": api_dropoff,
     "/api/dropoff/resolve": api_dropoff_resolve, "/api/dropoff/fav": api_dropoff_fav,
-    "/api/products": api_products, "/api/plan": api_plan, "/api/kits/auto": api_kits_auto, "/api/batch/create": api_batch_create, "/api/batches": api_batches,
+    "/api/products": api_products, "/api/plan": api_plan, "/api/batch/create": api_batch_create, "/api/batches": api_batches,
     "/api/batch": api_batch, "/api/batch/slot": api_batch_slot, "/api/batch/resume": api_batch_resume,
     "/api/batch/stop": api_batch_stop, "/api/batch/cancel": api_batch_cancel,
     "/api/batch/rebuild": api_batch_rebuild,

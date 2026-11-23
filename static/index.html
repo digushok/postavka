@@ -53,10 +53,6 @@
     <div class="card">
       <div class="card-h"><span class="step">2</span><div><h2>Распределение по кластерам</h2><p class="sub" id="distSub">Доли и количество — всё можно менять прямо в таблице</p></div>
         <div class="actions">
-          <div class="seg" id="distSeg">
-            <label><input type="radio" name="dmode" value="share"><span>По долям</span></label>
-            <label><input type="radio" name="dmode" value="kits"><span>Наборами</span></label>
-          </div>
           <select id="tplSel" class="pill-select" title="Шаблон кластеров и долей"></select>
           <button class="btn ghost" id="tplSave" title="Сохранить кластеры и доли в выбранный шаблон">Сохранить</button>
           <button class="btn ghost" id="tplSaveAs">Сохранить как…</button>
@@ -81,18 +77,6 @@
         <button class="btn ghost sm hidden" id="restBtn">Остаток → в кластер для остатка</button>
       </div>
       <div id="distWarn"></div>
-
-      <div id="kitsBlock" class="kits hidden">
-        <div class="card-h"><div><h2>Наборы</h2><p class="sub">Набор — грузоместа по одному на каждый SKU. Одинаковые наборы дают одинаковые коробки и общий файл этикеток.</p></div>
-          <div class="actions">
-            <span id="kitsManual" class="chip warn hidden">наборы правились вручную</span>
-            <button class="btn soft sm" id="kitsAuto">Подобрать по долям</button>
-            <button class="btn ghost sm" id="kitAdd">+ Набор</button>
-          </div>
-        </div>
-        <div class="scroll"><table class="grid matrix" id="kitsTable"></table></div>
-        <div class="muted small" id="kitsNote"></div>
-      </div>
     </div>
 
     <div class="card">

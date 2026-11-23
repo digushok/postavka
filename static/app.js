@@ -117,7 +117,7 @@ function newDraft() {
   const ts = P.timeslot || {};
   return {
     products: [], template: tpl ? tpl.name : "",
-    rows: rowsFromTemplate(tpl), mode: "share", kits: { defs: [], alloc: {}, manual: false },
+    rows: rowsFromTemplate(tpl), mode: "share",
     method: P.method || "remainder_city", remCity: P.remainder_city || "largest",
     tsmode: ts.mode || "auto",
     ts: { d1: addDays(ts.days_from ?? 2), t1: ts.time_from || "10:00" },
@@ -172,7 +172,6 @@ $("#prodTable").addEventListener("change", async (e) => {
   else if (t.classList.contains("p-box")) { p.box_size = num(t.value) || null; if (!p.box_size) p.multiple = false; else if (p.multiple === undefined) p.multiple = true; rememberProduct(p); renderProducts(); }
   else if (t.classList.contains("p-mult")) { p.multiple = t.checked; rememberProduct(p); }
   else if (t.classList.contains("p-qty")) { p.qty = num(t.value); }
-  if (D.mode === "kits" && !D.kits.manual) await autoKits();
   saveDraft(); replan();
 });
 const rememberProduct = debounce(async (p) => {
@@ -267,7 +266,6 @@ $("#pasteApply").onclick = async () => {
 
 /* ---- распределение по кластерам: одна таблица ---- */
 // D.rows: [{cluster_id, cluster_name, share, fixed}] — fixed: {sku: qty}, если количество в строке правили вручную
-// D.mode: "share" (по долям) | "kits" (наборами); D.kits: {defs:[{id, items:{sku:qty}}], alloc:{cid:{id:n}}, manual}
 const prodsOf = () => D.products.filter((p) => p.sku);
 const totalOf = (row) => Object.values(row || {}).reduce((a, v) => a + (+v || 0), 0);
 const purchaseTotal = () => prodsOf().reduce((a, p) => a + (p.qty || 0), 0);
@@ -287,8 +285,17 @@ function migrateDraft(d) {
   }
   // до 1.11.1 правка количества меняла долю строки — возвращаем исходную, чтобы не сдвигались другие строки
   for (const r of d.rows) if (r.fixed && r.share_before !== undefined) r.share = r.share_before;
-  d.mode = d.mode || "share";
-  d.kits = d.kits || { defs: [], alloc: {}, manual: false };
+  // режим «Наборами» убран (1.13.2): наборы черновика превращаем в количества по ячейкам
+  if (d.mode === "kits") {
+    const defs = (d.kits && d.kits.defs) || [], alloc = (d.kits && d.kits.alloc) || {};
+    for (const r of d.rows) {
+      const a = alloc[r.cluster_id ? String(r.cluster_id) : "?" + (r.match || r.cluster_name || "")] || {}, cells = {};
+      for (const k of defs) for (const [sku, q] of Object.entries(k.items || {})) cells[sku] = (cells[sku] || 0) + (+a[k.id] || 0) * (+q || 0);
+      r.fixed = cells;
+    }
+  }
+  d.mode = "share";
+  delete d.kits;
   return d;
 }
 function rowsFromTemplate(t) {
@@ -308,22 +315,16 @@ const rowKey = (r) => (r.cluster_id ? String(r.cluster_id) : "?" + (r.match || r
 
 function renderDistControls() {
   const P = APP.profile;
-  $$("input[name=dmode]").forEach((x) => (x.checked = x.value === D.mode));
   $("#tplSel").innerHTML = P.templates.map((t) => `<option ${t.name === D.template ? "selected" : ""}>${esc(t.name)}</option>`).join("");
   $("#method").value = D.method;
-  $("#methodWrap").classList.toggle("hidden", D.mode !== "share");
-  $("#remCityWrap").classList.toggle("hidden", D.mode === "share" && D.method === "floor");
-  $("#remCityLbl").textContent = D.mode === "kits" ? "Набор В (остаток) — в кластер" : "Кластер для остатка";
+  $("#remCityWrap").classList.toggle("hidden", D.method === "floor");
   $("#remCity").innerHTML = `<option value="largest">с наибольшей долей</option>` +
     D.rows.filter((r) => r.cluster_id).map((r) => `<option value="${esc(r.cluster_id)}" ${String(D.remCity) === String(r.cluster_id) ? "selected" : ""}>${esc(rowName(r))}</option>`).join("");
   if (![...$("#remCity").options].some((o) => o.selected)) $("#remCity").value = "largest";
   const used = new Set(D.rows.map((r) => String(r.cluster_id)));
   const free = (APP.clusters || []).filter((c) => !used.has(String(c.id)));
   $("#addCluster").innerHTML = free.length ? `<option value="">Добавить кластер…</option>` + free.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("") : `<option value="">Все кластеры уже в таблице</option>`;
-  $("#kitsBlock").classList.toggle("hidden", D.mode !== "kits");
-  $("#distSub").textContent = D.mode === "kits"
-    ? "Каждый кластер получает целые наборы (А, Б, В…). Меняйте доли, число наборов или их состав — всё пересчитается"
-    : "Меняйте доли или количество прямо в таблице — остальное пересчитается";
+  $("#distSub").textContent = "Меняйте доли или количество прямо в таблице — остальное пересчитается";
 }
 
 function renderDist() {
@@ -334,83 +335,45 @@ function renderDist() {
   const tot = purchaseTotal();
   if (!prods.length || !D.rows.length) {
     $("#dist").innerHTML = `<tr class="empty"><td>Добавьте товары в шаге 1 и кластеры кнопкой «+ Кластер».</td></tr>`;
-    $("#kitsTable").innerHTML = ""; $("#distWarn").innerHTML = ""; renderSummary(); return;
+    $("#distWarn").innerHTML = ""; renderSummary(); return;
   }
-  const kits = D.mode === "kits";
-  const defs = D.kits.defs || [];
-  let h = `<thead><tr><th>Кластер Озона</th><th>Доля, %</th>${kits ? `<th>Факт, %</th>` + defs.map((d) => `<th class="kit">Набор ${esc(d.id)}</th>`).join("") : ""}${prods.map((p) => `<th title="${esc(p.name || "")}">${esc(prodLabel(p))}</th>`).join("")}<th>Всего</th><th>Коробок</th><th></th></tr></thead><tbody>`;
+  let h = `<thead><tr><th>Кластер Озона</th><th>Доля, %</th>${prods.map((p) => `<th title="${esc(p.name || "")}">${esc(prodLabel(p))}</th>`).join("")}<th>Всего</th><th>Коробок</th><th></th></tr></thead><tbody>`;
   const col = {}; let offCells = 0;
   for (const r of D.rows) {
     const k = rowKey(r); const row = M[k] || {};
     const rt = totalOf(row);
     const actual = tot ? rt / tot * 100 : 0;
-    const shareShown = !kits && r.fixed ? actual : +r.share || 0;
-    h += `<tr data-k="${esc(k)}"><td class="cl" title="${esc(rowName(r))}">${esc(rowName(r))}${r.cluster_id ? "" : ' <span class="err-text">не найден в Озоне</span>'}${!kits && r.fixed ? `<span class="manual" data-reset="${esc(k)}" title="Количество задано вручную. Нажмите, чтобы снова считать от доли">вручную ↺</span>` : ""}</td>
+    const shareShown = r.fixed ? actual : +r.share || 0;
+    h += `<tr data-k="${esc(k)}"><td class="cl" title="${esc(rowName(r))}">${esc(rowName(r))}${r.cluster_id ? "" : ' <span class="err-text">не найден в Озоне</span>'}${r.fixed ? `<span class="manual" data-reset="${esc(k)}" title="Количество задано вручную. Нажмите, чтобы снова считать от доли">вручную ↺</span>` : ""}</td>
       <td><input class="share" type="number" min="0" step="0.5" value="${+shareShown.toFixed(1)}" data-share="${esc(k)}"></td>`;
-    if (kits) {
-      const dev = actual - (+r.share || 0);
-      h += `<td class="ro">${pct(actual)}${Math.abs(dev) >= 0.05 ? `<span class="dev ${Math.abs(dev) > 1.5 ? "bad-mark" : "muted"}">${dev > 0 ? "+" : ""}${pct(dev)}</span>` : ""}</td>`;
-      h += defs.map((d) => `<td class="kitc"><input class="kitn" type="number" min="0" value="${(D.kits.alloc[k] || {})[d.id] || 0}" data-kc="${esc(k)}" data-kid="${esc(d.id)}"></td>`).join("");
-    }
     for (const p of prods) {
       const v = row[p.sku] ?? 0;
       col[p.sku] = (col[p.sku] || 0) + v;
       const skuShare = buy[p.sku] ? v / buy[p.sku] * 100 : 0;
-      const off = !kits && rt > 0 && buy[p.sku] && Math.abs(skuShare - actual) > 0.5;   // в наборах округление — норма
+      const off = rt > 0 && buy[p.sku] && Math.abs(skuShare - actual) > 0.5;
       if (off) offCells++;
-      h += kits ? `<td class="ro ${off ? "warn-text" : ""}" title="${off ? `доля по этому SKU ${pct(skuShare)}%` : ""}">${fmt(v)}</td>`
-        : `<td><input type="number" min="0" value="${v}" data-c="${esc(k)}" data-s="${esc(p.sku)}" class="${off ? "off" : ""}" title="${off ? `Доля по этому SKU ${pct(skuShare)}%, а по кластеру ${pct(actual)}%` : ""}"></td>`;
+      h += `<td><input type="number" min="0" value="${v}" data-c="${esc(k)}" data-s="${esc(p.sku)}" class="${off ? "off" : ""}" title="${off ? `Доля по этому SKU ${pct(skuShare)}%, а по кластеру ${pct(actual)}%` : ""}"></td>`;
     }
     h += `<td class="tot">${fmt(rt)}</td><td class="boxes">${fmt((PLAN?.boxes || {})[k] || 0)}</td><td><button class="x" data-del="${esc(k)}" title="Убрать кластер">×</button></td></tr>`;
   }
   const allTot = prods.reduce((a, p) => a + (col[p.sku] || 0), 0);
   const shareSum = D.rows.reduce((a, r) => a + (+r.share || 0), 0);
-  const pad = kits ? `<td></td>` + defs.map((d) => `<td class="kitc ro"><b>${Object.values(D.kits.alloc).reduce((a, x) => a + (+(x || {})[d.id] || 0), 0)}</b></td>`).join("") : "";
   h += `</tbody><tfoot>
-    <tr><td class="lbl">Распределено</td><td class="${Math.abs(shareSum - 100) < 0.05 ? "ok-mark" : "bad-mark"}" title="Сумма долей">${pct(shareSum)}%</td>${pad}${prods.map((p) => `<td>${fmt(col[p.sku] || 0)}</td>`).join("")}<td>${fmt(allTot)}</td><td>${fmt(Object.values(PLAN?.boxes || {}).reduce((a, b) => a + b, 0))}</td><td></td></tr>
-    <tr><td class="lbl">Закуплено</td><td></td>${kits ? `<td></td>` + defs.map(() => "<td></td>").join("") : ""}${prods.map((p) => `<td><input type="number" min="0" value="${p.qty || 0}" data-buy="${esc(p.sku)}"></td>`).join("")}<td class="sub">${fmt(tot)}</td><td></td><td></td></tr>
-    <tr><td class="lbl">Проверка</td><td></td>${kits ? `<td></td>` + defs.map(() => "<td></td>").join("") : ""}${prods.map((p) => { const d = (col[p.sku] || 0) - (p.qty || 0); return `<td class="${d ? "bad-mark" : "ok-mark"}">${d ? (d > 0 ? "+" : "") + fmt(d) : "✓"}</td>`; }).join("")}<td class="${allTot - tot ? "bad-mark" : "ok-mark"}">${allTot - tot ? (allTot - tot > 0 ? "+" : "") + fmt(allTot - tot) : "✓"}</td><td></td><td></td></tr>
+    <tr><td class="lbl">Распределено</td><td class="${Math.abs(shareSum - 100) < 0.05 ? "ok-mark" : "bad-mark"}" title="Сумма долей">${pct(shareSum)}%</td>${prods.map((p) => `<td>${fmt(col[p.sku] || 0)}</td>`).join("")}<td>${fmt(allTot)}</td><td>${fmt(Object.values(PLAN?.boxes || {}).reduce((a, b) => a + b, 0))}</td><td></td></tr>
+    <tr><td class="lbl">Закуплено</td><td></td>${prods.map((p) => `<td><input type="number" min="0" value="${p.qty || 0}" data-buy="${esc(p.sku)}"></td>`).join("")}<td class="sub">${fmt(tot)}</td><td></td><td></td></tr>
+    <tr><td class="lbl">Проверка</td><td></td>${prods.map((p) => { const d = (col[p.sku] || 0) - (p.qty || 0); return `<td class="${d ? "bad-mark" : "ok-mark"}">${d ? (d > 0 ? "+" : "") + fmt(d) : "✓"}</td>`; }).join("")}<td class="${allTot - tot ? "bad-mark" : "ok-mark"}">${allTot - tot ? (allTot - tot > 0 ? "+" : "") + fmt(allTot - tot) : "✓"}</td><td></td><td></td></tr>
   </tfoot>`;
   $("#dist").innerHTML = h;
   const diffs = prods.some((p) => (col[p.sku] || 0) !== (p.qty || 0));
-  $("#restBtn").classList.toggle("hidden", !(diffs && D.mode === "share"));
+  $("#restBtn").classList.toggle("hidden", !diffs);
   const manualRows = D.rows.filter((r) => r.fixed).length;
-  $("#editedNote").classList.toggle("hidden", !(D.mode === "share" && manualRows));
+  $("#editedNote").classList.toggle("hidden", !manualRows);
   $("#editedNote").textContent = `вручную: ${manualRows} кластер.`;
   let warn = "";
   if (offCells) warn += `<div class="banner warn" style="margin-top:10px">Доля кластера уже не одинакова по всем SKU — такие ячейки подсвечены (наведите, чтобы увидеть долю по SKU).</div>`;
-  if (Math.abs(shareSum - 100) >= 0.05 && D.mode === "share") warn += `<div class="banner warn" style="margin-top:10px">Сумма долей ${pct(shareSum)}%, а не 100%.</div>`;
-  if (kits && (D.kits.warn || []).length) warn += D.kits.warn.map((w) => `<div class="banner err" style="margin-top:10px">${esc(w)}</div>`).join("");
+  if (Math.abs(shareSum - 100) >= 0.05) warn += `<div class="banner warn" style="margin-top:10px">Сумма долей ${pct(shareSum)}%, а не 100%.</div>`;
   $("#distWarn").innerHTML = warn;
-  if (kits) renderKits();
   renderSummary();
-}
-
-function renderKits() {
-  const prods = prodsOf();
-  const defs = D.kits.defs || [];
-  $("#kitsManual").classList.toggle("hidden", !D.kits.manual);
-  $("#kitsTable").innerHTML = defs.length ? `<thead><tr><th>Набор</th>${prods.map((p) => `<th>${esc(prodLabel(p))}</th>`).join("")}<th>Штук в наборе</th><th>Коробок в наборе</th><th>Наборов в поставке</th><th></th></tr></thead><tbody>` +
-    defs.map((d) => {
-      const n = Object.values(D.kits.alloc).reduce((a, x) => a + (+(x || {})[d.id] || 0), 0);
-      const boxes = prods.reduce((a, p) => a + splitCount(d.items[p.sku], p.box_size), 0);
-      return `<tr><td class="cl">Набор ${esc(d.id)}</td>${prods.map((p) => `<td><input type="number" min="0" value="${d.items[p.sku] || 0}" data-kd="${esc(d.id)}" data-ks="${esc(p.sku)}"></td>`).join("")}
-        <td class="tot">${fmt(totalOf(d.items))}</td><td class="ro">${boxes}</td><td class="boxes">${n}</td><td><button class="x" data-kdel="${esc(d.id)}" title="Удалить набор">×</button></td></tr>`;
-    }).join("") + "</tbody>"
-    : `<tr class="empty"><td>Нажмите «Подобрать по долям» — программа сама рассчитает наборы.</td></tr>`;
-  const st = D.kits.step || 2.5;
-  $("#kitsNote").innerHTML = defs.length ? `Шаг доли ${pct(st)}%: набор Б ≈ ${pct(st)}% закупки, набор А ≈ ${pct(st * 2)}%; остаток от округления — в набор В. «Факт» в таблице выше — доля по наборам, рядом отклонение от цели.` : "";
-}
-const splitCount = (q, box) => { q = +q || 0; box = +box || 0; return q <= 0 ? 0 : box > 0 ? Math.ceil(q / box) : 1; };
-
-async function autoKits() {
-  const prods = prodsOf();
-  if (!prods.length || !D.rows.some((r) => r.cluster_id)) return;
-  try {
-    const r = await api("/api/kits/auto", { products: prods, rows: D.rows.filter((x) => x.cluster_id).map((x) => ({ key: String(x.cluster_id), share: x.share })), remainder_city: D.remCity, step: 2.5, big_steps: 2 });
-    D.kits = { defs: r.defs, alloc: r.alloc, manual: false, step: r.step, warn: r.warn || [] };
-    saveDraft();
-  } catch (e) { toast(e.message, true); }
 }
 
 // изменения в таблице
@@ -419,7 +382,6 @@ $("#dist").addEventListener("change", async (e) => {
   if (t.dataset.share !== undefined) {                       // доля → строка считается от доли
     const r = D.rows.find((x) => rowKey(x) === t.dataset.share);
     r.share = parseFloat(String(t.value).replace(",", ".")) || 0; r.fixed = null;
-    if (D.mode === "kits" && !D.kits.manual) await autoKits();
   } else if (t.dataset.c !== undefined) {                    // количество → строка «вручную», доля из факта
     const r = D.rows.find((x) => rowKey(x) === t.dataset.c);
     if (!r.fixed) r.share_before = r.share;                    // для «↺» — вернуть исходную долю
@@ -429,10 +391,6 @@ $("#dist").addEventListener("change", async (e) => {
   } else if (t.dataset.buy !== undefined) {                  // закупка
     const p = D.products.find((x) => x.sku === t.dataset.buy); p.qty = num(t.value);
     renderProducts();
-    if (D.mode === "kits" && !D.kits.manual) await autoKits();
-  } else if (t.dataset.kc !== undefined) {                   // число наборов у кластера
-    D.kits.alloc[t.dataset.kc] = D.kits.alloc[t.dataset.kc] || {};
-    D.kits.alloc[t.dataset.kc][t.dataset.kid] = num(t.value); D.kits.manual = true;
   } else return;
   saveDraft(); replan();
 });
@@ -440,8 +398,6 @@ $("#dist").addEventListener("click", async (e) => {
   const t = e.target;
   if (t.dataset.del !== undefined) {
     D.rows = D.rows.filter((r) => rowKey(r) !== t.dataset.del);
-    delete D.kits.alloc[t.dataset.del];
-    if (D.mode === "kits" && !D.kits.manual) await autoKits();
     saveDraft(); replan();
   } else if (t.dataset.reset !== undefined) {
     const r = D.rows.find((x) => rowKey(x) === t.dataset.reset);
@@ -455,32 +411,6 @@ $("#dist").addEventListener("keydown", (e) => {
   const ins = $$("#dist tbody input"); const i = ins.indexOf(e.target); const step = $$("#dist tbody tr")[0].querySelectorAll("input").length;
   const next = ins[i + step] || ins[0]; next.focus(); next.select();
 });
-$("#kitsTable").addEventListener("change", (e) => {
-  const t = e.target; if (t.dataset.kd === undefined) return;
-  const d = D.kits.defs.find((x) => x.id === t.dataset.kd); d.items[t.dataset.ks] = num(t.value);
-  D.kits.manual = true; saveDraft(); replan();
-});
-$("#kitsTable").addEventListener("click", (e) => {
-  const id = e.target.dataset.kdel; if (id === undefined) return;
-  D.kits.defs = D.kits.defs.filter((d) => d.id !== id);
-  for (const a of Object.values(D.kits.alloc)) if (a) delete a[id];
-  D.kits.manual = true; saveDraft(); replan();
-});
-$("#kitAdd").onclick = () => {
-  const names = ["А", "Б", "В", "Г", "Д", "Е", "Ж", "З", "И", "К"];
-  const id = names.find((n) => !D.kits.defs.some((d) => d.id === n)) || "Н" + (D.kits.defs.length + 1);
-  D.kits.defs.push({ id, items: Object.fromEntries(prodsOf().map((p) => [p.sku, 0])) });
-  D.kits.manual = true; saveDraft(); replan();
-};
-$("#kitsAuto").onclick = async () => {
-  if (D.kits.manual && !(await confirmBox("<h3>Подобрать наборы заново?</h3><p>Ручные правки наборов будут заменены расчётом по долям.</p>", "Подобрать"))) return;
-  await autoKits(); replan();
-};
-$$("input[name=dmode]").forEach((x) => (x.onchange = async () => {
-  D.mode = x.value;
-  if (D.mode === "kits" && !(D.kits.defs || []).length) await autoKits();
-  saveDraft(); replan();
-}));
 $("#addClusterBtn").onclick = async () => {
   const id = $("#addCluster").value; if (!id) return toast("Выберите кластер в списке");
   const c = (APP.clusters || []).find((x) => String(x.id) === id);
@@ -500,14 +430,13 @@ $("#restBtn").onclick = () => {
   saveDraft(); replan(); toast(`Остаток добавлен в «${rowName(target)}»`);
 };
 $("#method").onchange = (e) => { D.method = e.target.value; saveDraft(); replan(); };
-$("#remCity").onchange = async (e) => { D.remCity = e.target.value; if (D.mode === "kits" && !D.kits.manual) await autoKits(); saveDraft(); replan(); };
-$("#recalc").onclick = async () => { for (const r of D.rows) { if (r.fixed && r.share_before !== undefined) r.share = r.share_before; r.fixed = null; delete r.share_before; } if (D.mode === "kits") await autoKits(); saveDraft(); replan(); };
+$("#remCity").onchange = (e) => { D.remCity = e.target.value; saveDraft(); replan(); };
+$("#recalc").onclick = async () => { for (const r of D.rows) { if (r.fixed && r.share_before !== undefined) r.share = r.share_before; r.fixed = null; delete r.share_before; } saveDraft(); replan(); };
 $("#tplSel").onchange = async (e) => {
   const t = APP.profile.templates.find((x) => x.name === e.target.value);
   if (!t) return;
   D.template = t.name; D.rows = rowsFromTemplate(t); bindRows();
   await saveProfile({ template: t.name });
-  if (D.mode === "kits") await autoKits();
   saveDraft(); replan();
 };
 async function saveTemplate(name) {
@@ -532,7 +461,6 @@ const replan = debounce(async () => {
   const body = {
     products: prodsOf().map((p) => ({ ...p, short: prodLabel(p) })), mode: D.mode, method: D.method, remainder_city: D.remCity,
     rows: D.rows.map((r) => ({ key: rowKey(r), share: r.share, name: rowName(r), fixed: r.fixed })),
-    kits: { defs: D.kits.defs, alloc: D.kits.alloc },
   };
   try {
     PLAN = await api("/api/plan", body);
@@ -603,7 +531,6 @@ $("#createBtn").onclick = async () => {
   const M = PLAN?.matrix || {};
   const used = D.rows.filter((r) => totalOf(M[rowKey(r)]) > 0);
   if (used.some((r) => !r.cluster_id)) errs.push("есть кластеры, не найденные в Озоне");
-  if (D.mode === "kits" && (D.kits.warn || []).length) errs.push("наборов больше, чем закуплено");
   if (!D.dropoff) errs.push("не выбрана точка отгрузки");
   if (D.tsmode === "auto" && !D.ts.d1) errs.push("не указан желаемый день поставки");
 
@@ -626,8 +553,6 @@ $("#createBtn").onclick = async () => {
       products: prods.map((p) => ({ sku: p.sku, qty: p.qty, name: p.name, short: prodLabel(p), box_size: p.box_size || null })),
       cities: used.map((r) => ({ cluster_id: String(r.cluster_id), name: rowName(r), cluster_name: rowName(r) })),
       matrix: Object.fromEntries(used.map((r) => [String(r.cluster_id), M[rowKey(r)]])),
-      dist: D.mode === "kits" ? "kits" : "share",
-      kits: D.mode === "kits" ? { defs: D.kits.defs, alloc: D.kits.alloc } : null,
       mode: D.tsmode, slot_pref: { date: D.ts.d1, time: D.ts.t1 || "10:00" },
       dropoff: D.dropoff, pass: Object.assign({}, APP.profile.pass || {}, { enabled: D.passOn }), multi: !!D.multi,
       source: JSON.parse(JSON.stringify(D)),
@@ -885,7 +810,6 @@ function recreate(b) {
     }
     const tot = D.products.reduce((a, p) => a + p.qty, 0) || 1;
     for (const r of D.rows) r.share = Math.round(totalOf(r.fixed) / tot * 1000) / 10;
-    if (b.kits) { D.mode = "kits"; D.kits = { defs: b.kits.defs, alloc: b.kits.alloc, manual: true }; }
     D.dropoff = b.dropoff || D.dropoff; D.multi = !!b.multi;
   }
   saveDraft(); closeBatch(); showTab("new"); renderNew();

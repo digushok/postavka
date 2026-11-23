@@ -58,37 +58,3 @@ class T(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class Kits(unittest.TestCase):
-    """Пример пользователя: закупка 4 100 шт, доли кратны 2,5%."""
-    P = [{"sku": s, "qty": q} for s, q in
-         [("32", 500), ("64", 700), ("128", 1200), ("256", 800), ("512", 400), ("1T", 300), ("2T", 200)]]
-    R = [{"cluster_id": c, "share": s} for c, s in
-         [("msk", 30), ("spb", 12.5), ("rnd", 7.5), ("ekb", 7.5), ("ufa", 7.5), ("kzn", 5), ("vrn", 5), ("krd", 5),
-          ("yar", 5), ("srt", 5), ("nev", 5), ("prm", 2.5), ("orb", 2.5), ("tvr", 0)]]
-
-    def test_user_example(self):
-        r = P.auto_kits(self.P, self.R, remainder_cluster="msk")
-        d = {k["id"]: k["items"] for k in r["defs"]}
-        self.assertEqual([d["А"][s] for s in ["32", "64", "128", "256", "512", "1T", "2T"]], [25, 35, 60, 40, 20, 15, 10])
-        self.assertEqual([d["Б"][s] for s in ["32", "64", "128", "256", "512", "1T", "2T"]], [12, 17, 30, 20, 10, 7, 5])
-        self.assertEqual([d["В"][s] for s in ["32", "64", "128", "256", "512", "1T", "2T"]], [28, 38, 60, 40, 20, 18, 10])
-        a = r["alloc"]
-        self.assertEqual(a["msk"], {"А": 5, "Б": 0, "В": 1})
-        self.assertEqual(a["spb"], {"А": 2, "Б": 1})
-        self.assertEqual(a["prm"], {"А": 0, "Б": 1})
-        self.assertEqual(a["tvr"], {"А": 0, "Б": 0})
-        self.assertEqual(sum(v.get("А", 0) for v in a.values()), 16)
-        self.assertEqual(sum(v.get("Б", 0) for v in a.values()), 6)
-        m = P.kits_matrix(r["defs"], a, self.P)
-        for p in self.P:
-            self.assertEqual(sum(m[c][p["sku"]] for c in m), p["qty"])
-        boxes = P.build_boxes_kits(r["defs"], a, self.P, [x["cluster_id"] for x in self.R])
-        self.assertEqual(sum(len(b) for b in boxes.values()), 23 * 7)
-        g = {x["id"]: x["total"] for x in P.group_boxes(boxes, self.P, [x["cluster_id"] for x in self.R])}
-        self.assertEqual(g["32x25"], 16)
-
-    def test_steps_sum(self):
-        st = P.round_shares_to_steps([{"cluster_id": i, "share": s} for i, s in enumerate([29, 11.5, 1.5, 58])])
-        self.assertEqual(sum(st.values()), 40)
