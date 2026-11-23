@@ -320,40 +320,41 @@ def info_page(width, height, lines):
     return PdfReader(buf).pages[0]
 
 
-def build_cargo(paths, out_path, short):
-    """Этикетки грузомест одного товара: сначала информационный лист с коротким именем товара
-    (размером с этикетку грузоместа), дальше оригинальные этикетки Озона. Возвращает число страниц."""
+def _write_reversed(pages, out_path):
+    """Страницы в обратном порядке: первая — последней, вторая — предпоследней и т. д."""
     w = PdfWriter()
-    first = None
-    for p in paths:
-        for page in PdfReader(p).pages:
-            if first is None:
-                first = page
-                box = page.mediabox
-                w.add_page(info_page(float(box.width), float(box.height), [(short, 0.16)]))
-            w.add_page(page)
+    for page in reversed(pages):
+        w.add_page(page)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "wb") as f:
         w.write(f)
-    return len(w.pages)
+    return len(pages)
+
+
+def build_cargo(paths, out_path, short):
+    """Этикетки грузомест одного товара: информационный лист с коротким именем товара
+    (размером с этикетку грузоместа) и оригинальные этикетки Озона. Порядок страниц обратный:
+    в файле сначала последний город, информационный лист — последней страницей. Возвращает число страниц."""
+    pages = []
+    for p in paths:
+        for page in PdfReader(p).pages:
+            if not pages:
+                box = page.mediabox
+                pages.append(info_page(float(box.width), float(box.height), [(short, 0.16)]))
+            pages.append(page)
+    return _write_reversed(pages, out_path)
 
 
 def build_barcodes(label_pdf, plan, out_path, short=""):
-    """Этикетка товара (первая страница файла) × количество для каждого города.
-    Перед каждым городом — информационная этикетка того же размера: товар коротко, сколько штук, город.
-    Возвращает число страниц."""
+    """Этикетка товара (первая страница файла) × количество для каждого города, перед каждым городом —
+    информационная этикетка того же размера: товар коротко, сколько штук, город.
+    Порядок страниц обратный: в файле сначала последний город, его информационная этикетка —
+    после его штрихкодов. Возвращает число страниц."""
     page = PdfReader(label_pdf).pages[0]
     w_, h_ = float(page.mediabox.width), float(page.mediabox.height)
-    w = PdfWriter()
-    pages = 0
+    pages = []
     for city, q in plan:
-        w.add_page(info_page(w_, h_, [(short, 0.26), (f"{q} шт", 0.26), (city, 0.17)] if short
-                             else [(f"{q} шт", 0.30), (city, 0.20)]))
-        pages += 1
-        for _ in range(q):
-            w.add_page(page)
-            pages += 1
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with open(out_path, "wb") as f:
-        w.write(f)
-    return pages
+        pages.append(info_page(w_, h_, [(short, 0.26), (f"{q} шт", 0.26), (city, 0.17)] if short
+                               else [(f"{q} шт", 0.30), (city, 0.20)]))
+        pages += [page] * q
+    return _write_reversed(pages, out_path)
