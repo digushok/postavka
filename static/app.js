@@ -237,6 +237,8 @@ function migrateDraft(d) {
     });
     delete d.cities; delete d.edited; delete d.matrix;
   }
+  // до 1.11.1 правка количества меняла долю строки — возвращаем исходную, чтобы не сдвигались другие строки
+  for (const r of d.rows) if (r.fixed && r.share_before !== undefined) r.share = r.share_before;
   d.mode = d.mode || "share";
   d.kits = d.kits || { defs: [], alloc: {}, manual: false };
   return d;
@@ -374,10 +376,10 @@ $("#dist").addEventListener("change", async (e) => {
     const r = D.rows.find((x) => rowKey(x) === t.dataset.c);
     if (!r.fixed) r.share_before = r.share;                    // для «↺» — вернуть исходную долю
     r.fixed = { ...((PLAN?.matrix || {})[t.dataset.c] || {}) }; r.fixed[t.dataset.s] = num(t.value);
-    const tot = purchaseTotal(); r.share = tot ? Math.round(totalOf(r.fixed) / tot * 1000) / 10 : 0;
+    // доля строки (r.share) не меняется: от неё считаются остальные строки, и правка одной ячейки
+    // не должна сдвигать количества в других кластерах. В строке показывается фактическая доля.
   } else if (t.dataset.buy !== undefined) {                  // закупка
     const p = D.products.find((x) => x.sku === t.dataset.buy); p.qty = num(t.value);
-    for (const r of D.rows) if (r.fixed) { const tot = purchaseTotal(); r.share = tot ? Math.round(totalOf(r.fixed) / tot * 1000) / 10 : 0; }
     renderProducts();
     if (D.mode === "kits" && !D.kits.manual) await autoKits();
   } else if (t.dataset.kc !== undefined) {                   // число наборов у кластера
@@ -447,7 +449,6 @@ $("#restBtn").onclick = () => {
   if (!target.fixed) target.share_before = target.share;
   target.fixed = { ...(M[k] || {}) };
   for (const p of prodsOf()) target.fixed[p.sku] = Math.max(0, (target.fixed[p.sku] || 0) + (p.qty || 0) - (col[p.sku] || 0));
-  const tot = purchaseTotal(); target.share = tot ? Math.round(totalOf(target.fixed) / tot * 1000) / 10 : 0;
   saveDraft(); replan(); toast(`Остаток добавлен в «${rowName(target)}»`);
 };
 $("#method").onchange = (e) => { D.method = e.target.value; saveDraft(); replan(); };
