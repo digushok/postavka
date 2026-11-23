@@ -84,7 +84,10 @@ class CargoBySku(unittest.TestCase):
         self.assertEqual([os.path.basename(p) for p in paths], ["k20.pdf", "u20.pdf", "m20.pdf", "m5.pdf"])
         self.assertEqual(missing, 1)
         out = os.path.join(d, "out.pdf")
-        self.assertEqual(L.merge(paths, out), 5)
+        self.assertEqual(L.build_cargo(paths, out, "32 ГБ"), 6)          # информационный лист + 5 этикеток
+        r = PdfReader(out)
+        self.assertIn("32 ГБ", r.pages[0].extract_text())
+        self.assertEqual((float(r.pages[0].mediabox.width), float(r.pages[0].mediabox.height)), (200.0, 300.0))
         self.assertEqual([os.path.basename(p) for p in L.cargo_plan(b, d, "222")[0]], ["m4.pdf"])
 
 

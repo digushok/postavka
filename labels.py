@@ -320,6 +320,24 @@ def info_page(width, height, lines):
     return PdfReader(buf).pages[0]
 
 
+def build_cargo(paths, out_path, short):
+    """Этикетки грузомест одного товара: сначала информационный лист с коротким именем товара
+    (размером с этикетку грузоместа), дальше оригинальные этикетки Озона. Возвращает число страниц."""
+    w = PdfWriter()
+    first = None
+    for p in paths:
+        for page in PdfReader(p).pages:
+            if first is None:
+                first = page
+                box = page.mediabox
+                w.add_page(info_page(float(box.width), float(box.height), [(short, 0.16)]))
+            w.add_page(page)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "wb") as f:
+        w.write(f)
+    return len(w.pages)
+
+
 def build_barcodes(label_pdf, plan, out_path, short=""):
     """Этикетка товара (первая страница файла) × количество для каждого города.
     Перед каждым городом — информационная этикетка того же размера: товар коротко, сколько штук, город.
