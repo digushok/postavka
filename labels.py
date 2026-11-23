@@ -321,10 +321,13 @@ def info_page(width, height, lines):
 
 
 def _write_reversed(pages, out_path):
-    """Страницы в обратном порядке: первая — последней, вторая — предпоследней и т. д."""
+    """Страницы в обратном порядке (первая — последней, вторая — предпоследней и т. д.),
+    каждая повёрнута на 180° — вверх ногами."""
+    from pypdf.generic import NameObject, NumberObject
     w = PdfWriter()
     for page in reversed(pages):
-        w.add_page(page)
+        rot = (int(page.get("/Rotate", 0) or 0) + 180) % 360      # поворот исходной страницы + 180°
+        w.add_page(page)[NameObject("/Rotate")] = NumberObject(rot)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "wb") as f:
         w.write(f)

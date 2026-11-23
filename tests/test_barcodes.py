@@ -53,6 +53,7 @@ class Barcodes(unittest.TestCase):
         self.assertEqual(r.pages[0].extract_text().strip(), "")     # в начале — штрихкоды Москвы
         self.assertIn("Москва", r.pages[100].extract_text())        # после 100 штрихкодов Москвы — её этикетка
         self.assertEqual(round(float(r.pages[0].mediabox.width) / 72 * 25.4), 58)
+        self.assertTrue(all(pg.rotation == 180 for pg in r.pages))     # каждая страница вверх ногами
 
 
 
@@ -88,6 +89,7 @@ class CargoBySku(unittest.TestCase):
         self.assertEqual(L.build_cargo(paths, out, "32 ГБ"), 6)          # информационный лист + 5 этикеток
         r = PdfReader(out)
         self.assertIn("32 ГБ", r.pages[5].extract_text())                 # порядок обратный — лист последний
+        self.assertTrue(all(pg.rotation == 180 for pg in r.pages))
         self.assertEqual((float(r.pages[5].mediabox.width), float(r.pages[5].mediabox.height)), (200.0, 300.0))
         self.assertEqual([os.path.basename(p) for p in L.cargo_plan(b, d, "222")[0]], ["m4.pdf"])
 
