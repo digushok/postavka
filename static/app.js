@@ -706,6 +706,7 @@ function renderBatch(b) {
       ${busy && b.phase !== "cancelling" ? '<button class="btn" id="bStop">Остановить</button>' : ""}
       ${!busy && ["error", "partial", "stopped", "new"].includes(b.phase) ? '<button class="btn primary" id="bResume">Продолжить</button>' : ""}
       ${!busy && b.phase !== "cancelled" && ships.some((s) => s.order_id && !s.cancelled) ? '<button class="btn soft" id="bSync">Сверить с Озоном</button>' : ""}
+      ${!["cancelling", "cancelled"].includes(b.phase) ? '<button class="btn soft" id="bAddSup" title="Добавить в партию поставку, уже созданную в Озоне: её грузоместа, этикетки и штрихкоды войдут в партию">+ Поставка по номеру</button>' : ""}
       ${!busy && (b.phase === "cancelled" || b.phase === "error") ? '<button class="btn primary" id="bAgain">Создать заново</button>' : ""}
       <button class="btn soft" id="bFolder">Открыть папку</button>
       ${b.phase !== "cancelling" && ships.some((s) => s.order_id && !s.cancelled) ? `<button class="btn danger" id="bCancel">${busy ? "Остановить и отменить заявки" : "Отменить заявки"}</button>` : ""}
@@ -728,9 +729,9 @@ function renderBatch(b) {
   if (b.phase === "await_slot" && !b.running) h += slotPicker(b);
 
   h += `<div class="card"><div class="card-h"><div><h2>Поставки</h2></div></div><div class="scroll"><table class="grid"><thead><tr><th>Кластер</th><th>По данным Озона</th><th>Статус</th><th>Заявка</th><th class="r">Коробок</th><th class="r">Шт</th><th>Таймслот</th><th>Примечания</th><th></th></tr></thead><tbody>` +
-    ships.map((s) => { const cl = s.actual_cluster || s.ozon_cluster_name || s.cluster_name || "—"; return `<tr class="${s.mismatch && !s.cancelled ? "mismatch" : ""} ${s.cancelled ? "dim" : ""}"><td><b>${esc(s.name)}</b></td><td class="small">${esc(cl)}${s.mismatch ? ' <span class="err-text">не тот кластер!</span>' : ""}</td><td>${tag(SST, s.status)}</td><td>${esc(s.order_number || s.order_id || "—")}</td><td class="r">${s.boxes.length}</td><td class="r">${fmt(units(s))}</td><td class="small">${s.slot ? esc(humanSlot(s.slot)) : s.no_slot && s.order_id ? '<span class="warn-text">без таймслота</span>' : "—"}</td>
+    ships.map((s) => { const cl = s.actual_cluster || s.ozon_cluster_name || s.cluster_name || "—"; return `<tr class="${s.mismatch && !s.cancelled ? "mismatch" : ""} ${s.cancelled ? "dim" : ""}"><td><b>${esc(s.name)}</b>${s.imported ? ' <span class="chip plain" title="Поставка создана не этой партией — добавлена по номеру">добавлена</span>' : ""}</td><td class="small">${esc(cl)}${s.mismatch ? ' <span class="err-text">не тот кластер!</span>' : ""}</td><td>${tag(SST, s.status)}</td><td>${esc(s.order_number || s.order_id || "—")}</td><td class="r">${s.boxes.length}</td><td class="r">${fmt(units(s))}</td><td class="small">${s.slot ? esc(humanSlot(s.slot)) : s.no_slot && s.order_id ? '<span class="warn-text">без таймслота</span>' : "—"}</td>
       <td>${typeof s.verified === "number" ? `<div class="good small">✓ состав подтверждён Озоном</div>` : ""}${s.error ? `<div class="err-text">${esc(s.error)}</div>` : ""}${(s.warn || []).map((w) => `<div class="warn-text">${esc(w)}</div>`).join("")}</td>
-      <td class="r">${!busy && !b.multi && s.order_id && !s.cancelled ? `<button class="btn danger sm" data-cancel="${esc(skey(s))}">Отменить</button>` : ""}${canReplace(s) && b.phase !== "cancelling" ? `<span class="row-acts"><button class="btn soft sm icon-sm" data-retry="${esc(skey(s))}" title="Повторить попытку в этот же кластер" aria-label="Повторить попытку"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg></button><button class="btn soft sm" data-repl="${esc(skey(s))}">Заменить кластер</button></span>` : ""}</td></tr>`; }).join("") + `</tbody></table></div>${b.synced_at ? `<div class="muted small" style="margin-top:8px">Сверено с Озоном ${esc(b.synced_at)}</div>` : ""}</div>`;
+      <td class="r">${!busy && (!b.multi || s.imported) && s.order_id && !s.cancelled ? `<button class="btn danger sm" data-cancel="${esc(skey(s))}">Отменить</button>` : ""}${canReplace(s) && b.phase !== "cancelling" ? `<span class="row-acts"><button class="btn soft sm icon-sm" data-retry="${esc(skey(s))}" title="Повторить попытку в этот же кластер" aria-label="Повторить попытку"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg></button><button class="btn soft sm" data-repl="${esc(skey(s))}">Заменить кластер</button></span>` : ""}</td></tr>`; }).join("") + `</tbody></table></div>${b.synced_at ? `<div class="muted small" style="margin-top:8px">Сверено с Озоном ${esc(b.synced_at)}</div>` : ""}</div>`;
 
   h += barcodesCard(b);
   const groups = b.groups || [];
@@ -769,6 +770,22 @@ function renderBatch(b) {
     showBatch(b.id);
   });
   $$("[data-repl]").forEach((el) => (el.onclick = () => askReplace(b, ships.find((x) => skey(x) === el.dataset.repl))));
+  $("#bAddSup") && ($("#bAddSup").onclick = async () => {
+    promptBox._v = "";
+    const ok = await confirmBox(`<h3>Добавить поставку по номеру</h3>
+      <input id="promptIn" placeholder="Например: 2000075570670" autocomplete="off">
+      <p class="muted small">Номер заявки из кабинета Озона или с этикетки грузоместа (пробелы не важны), можно ID заявки или номер поставки.
+      Несколько — через запятую. Программа возьмёт из Озона состав и грузоместа (если их нет — создаст сама),
+      скачает этикетки, и поставка войдёт в «Этикетки», «По товарам» и лист сборки.</p>`, "Добавить");
+    const numbers = (promptBox._v || "").trim(); promptBox._v = "";
+    if (!ok || !numbers) return;
+    toast("Ищу у Озона…");
+    try {
+      const r = await api("/api/batch/add_supply", { id: b.id, numbers });
+      toast(`Добавлено: ${r.added.join(", ")}` + (r.errors.length ? `. Не добавлено: ${r.errors.join("; ")}` : ""), !!r.errors.length);
+    } catch (e) { toast(e.message, true); }
+    showBatch(b.id);
+  });
   $("#bRename").onclick = async () => {
     promptBox._v = b.title || "";
     const ok = await confirmBox(`<h3>Название партии</h3><input id="promptIn" maxlength="120" placeholder="Например: Карты памяти, неделя 48" value="${esc(b.title || "")}"><p class="muted small">Пустое название — снова «Партия от ${esc(b.created)}».</p>`, "Сохранить");
