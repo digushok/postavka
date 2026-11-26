@@ -1051,12 +1051,16 @@ async function checkUpdate(force, quiet) {
     const r = await api("/api/update", { force: !!force });
     const box = r.ok ? (r.newer ? (APP.server
       ? `<div class="upd new"><b>Доступна версия ${esc(r.latest)}</b><span class="muted">обновляется на сервере</span><a class="link" href="${esc(r.page)}" target="_blank" rel="noopener">Что нового</a></div>`
+        + (r.busy ? `<div class="upd warn-text">Сейчас создаются поставки — обновляйте после того, как партия закончится</div>` : "")
       : `<div class="upd new"><b>Доступна версия ${esc(r.latest)}</b><a class="btn primary sm" href="${esc(r.url)}" target="_blank" rel="noopener">Скачать</a><a class="link" href="${esc(r.page)}" target="_blank" rel="noopener">Что нового</a></div>`)
       : `<div class="upd">У вас последняя версия (${esc(APP.ver.version)})</div>`)
       : `<div class="upd">Не удалось проверить обновления: ${esc(r.error)}</div>`;
     if (!quiet || r.newer) $("#updRes").innerHTML = box;
     const f = $("#verUpd");
-    if (r.ok && r.newer) { f.textContent = APP.server ? `доступна ${r.latest}` : `доступна ${r.latest} — скачать`; f.href = APP.server ? r.page : r.url; } else { f.textContent = ""; f.removeAttribute("href"); }
+    if (r.ok && r.newer) {
+      f.textContent = (APP.server ? `доступна ${r.latest}` : `доступна ${r.latest} — скачать`) + (r.busy ? " · не обновляйте, пока создаются поставки" : "");
+      f.classList.toggle("warn-text", !!r.busy); f.href = APP.server ? r.page : r.url;
+    } else { f.textContent = ""; f.removeAttribute("href"); }
   } catch (e) { if (!quiet) $("#updRes").innerHTML = `<div class="upd">${esc(e.message)}</div>`; }
 }
 $("#updCheck").onclick = () => checkUpdate(true);

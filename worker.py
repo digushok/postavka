@@ -335,7 +335,7 @@ class Run:
                 slot = self.take_slot(avail, s)
             self.set(s, "supply")
             try:
-                order_id = self.submit_supply(s["draft_id"], "CROSSDOCK", [s], slot)
+                order_id = self.submit_supply(s["draft_id"], "CROSSDOCK", [s], slot, s)
                 break
             except OzonError as e:
                 if "TIMESLOT_NOT_AVAILABLE" not in getattr(e, "codes", ()) or attempt == 3:
@@ -376,7 +376,7 @@ class Run:
             self.create_draft(s)
         self.set(s, "supply")
         try:
-            order_id = self.submit_supply(s["draft_id"], "CROSSDOCK", [s], None)
+            order_id = self.submit_supply(s["draft_id"], "CROSSDOCK", [s], None, s)
         except OzonError as e:
             if self.no_slot_mode():
                 raise OzonError(f"Заявку без таймслота Озон не принял: {e}")
@@ -390,26 +390,88 @@ class Run:
         self.save()
         self.log(f"Заявка создана, id {order_id}, без таймслота — выберите таймслот в кабинете Озона", s, "warn")
 
-    def submit_supply(self, draft_id, supply_type, ships, slot):
+    def submit_supply(self, draft_id, supply_type, ships, slot, holder):
+        """Отправляет заявку и ждёт её номер. Перед отправкой в holder (поставка или общая заявка) пишется
+        «submitting»: если программу остановят, пока Озон создаёт заявку, при «Продолжить» программа
+        сначала спросит Озон о судьбе этой заявки (recover_submits), а не создаст вторую."""
         body = {"draft_id": draft_id, "selected_cluster_warehouses": self.cluster_wh(ships),
                 "supply_type": supply_type}
         if slot:                         # без слота — заявка «без таймслота», слот выбирается в кабинете
             body["timeslot"] = {"from_in_timezone": slot[0], "to_in_timezone": slot[1]}
-        r = self.api.post("/v2/draft/supply/create", body)
-        errs = [e for e in (r.get("error_reasons") or []) if e not in ("UNSPECIFIED",)]
-        if errs:
-            e = OzonError("Заявка не создана: " + _reasons(errs))
-            e.codes = errs
-            raise e
-        st = self.api.poll("/v2/draft/supply/create/status", {"draft_id": draft_id},
-                           lambda x: x.get("status") not in ("IN_PROGRESS", None, "", "UNSPECIFIED"),
-                           interval=3, timeout=300)
+        self.check_stop()
+        holder["submitting"] = {"draft_id": draft_id, "slot": slot, "at": time.time()}
+        self.save()
+        flag, self.api.stop_flag = self.api.stop_flag, None     # от отправки до номера — без остановки
+        try:
+            r = self.api.post("/v2/draft/supply/create", body)
+            errs = [e for e in (r.get("error_reasons") or []) if e not in ("UNSPECIFIED",)]
+            if errs:
+                holder.pop("submitting", None)
+                e = OzonError("Заявка не создана: " + _reasons(errs))
+                e.codes = errs
+                raise e
+            st = self.supply_status(draft_id)
+        finally:
+            self.api.stop_flag = flag
+        holder.pop("submitting", None)
         if st.get("status") != "SUCCESS" or not st.get("order_id"):
             codes = [c for c in st.get("error_reasons") or [] if c != "UNSPECIFIED"] or [st.get("status", "")]
             e = OzonError("Заявка не создана: " + _reasons(codes))
             e.codes = codes
             raise e
         return st["order_id"]
+
+    def supply_status(self, draft_id):
+        return self.api.poll("/v2/draft/supply/create/status", {"draft_id": draft_id},
+                             lambda x: x.get("status") not in ("IN_PROGRESS", None, "", "UNSPECIFIED"),
+                             interval=3, timeout=300)
+
+    def recover_submits(self):
+        """Заявки, отправленные в Озон перед остановкой программы, но без полученного номера:
+        спрашиваем Озон, создана ли заявка по тому черновику. Создана — берём её номер, не создана —
+        можно отправлять заново. Не удалось узнать — останавливаемся, чтобы не создать вторую."""
+        b = self.batch
+        M = b.get("order") or {}
+        holders = ([M] if b.get("multi") and M.get("submitting") and not M.get("order_id") else []) + \
+                  [s for s in self.active() if s.get("submitting") and not s.get("order_id")]
+        for h in holders:
+            sub = h["submitting"]
+            ship = h if "name" in h else None
+            try:
+                st = self.supply_status(sub["draft_id"])
+            except OzonError as e:
+                if self.stop.is_set():
+                    raise
+                sub["tries"] = sub.get("tries", 0) + 1
+                if sub["tries"] < 3:
+                    self.save()
+                    raise OzonError(f"Перед остановкой программы заявка{' в ' + ship['name'] if ship else ''} "
+                                    f"уже отправлялась в Озон, а узнать, создана ли она, не удалось ({e}). "
+                                    f"Нажмите «Продолжить» ещё раз через минуту")
+                h.pop("submitting", None)
+                msg = ("Не удалось узнать у Озона, создалась ли заявка, отправленная перед остановкой программы, — "
+                       "отправляю заново. Проверьте в кабинете Озона, нет ли двух заявок в этот кластер")
+                (ship or {}).setdefault("warn", []).append(msg)
+                self.log(msg, ship, "warn")
+                continue
+            h.pop("submitting", None)
+            if st.get("status") == "SUCCESS" and st.get("order_id"):
+                slot = sub.get("slot")
+                if ship:
+                    ship["order_id"], ship["slot"] = st["order_id"], slot
+                    if not slot:
+                        ship["no_slot"] = True
+                    self.set(ship, "supply")
+                else:
+                    M["order_id"], M["slot"] = st["order_id"], slot
+                    b["slot_locked"] = True
+                    for s in self.multi_ships():
+                        s["order_id"], s["slot"], s["no_slot"] = st["order_id"], slot, not slot
+                self.log(f"Заявка была создана до остановки программы — номер получен у Озона: {st['order_id']}", ship)
+            else:
+                self.log("Заявка, отправленная перед остановкой программы, Озоном не создана — отправляю заново",
+                         ship, "warn")
+            self.save()
 
     def fetch_order(self, order_id, ships):
         """Ждёт, пока Озон выдаст номера поставок, и раскладывает их по городам (по кластеру)."""
@@ -916,6 +978,8 @@ class Run:
     def run(self):
         b = self.batch
         b["error"] = None
+        b.pop("interrupted", None)
+        self.recover_submits()                   # заявки, отправленные перед остановкой программы
         self.take_replacements()                 # замены, выбранные пока программа не работала
         if b.get("multi"):
             return self.run_multi()
@@ -1058,7 +1122,7 @@ class Run:
                 if self.no_slot_mode():
                     slot = None
                     try:
-                        M["order_id"] = self.submit_supply(M["draft_id"], "MULTI_CLUSTER", live, None)
+                        M["order_id"] = self.submit_supply(M["draft_id"], "MULTI_CLUSTER", live, None, M)
                     except OzonError as e:
                         msg = f"Заявку без таймслота Озон не принял: {e}"
                         for s in live:
@@ -1072,7 +1136,7 @@ class Run:
                         self.set(s, "error", self.no_slots_text())
                     return self.fail(self.no_slots_text())
                 try:
-                    M["order_id"] = self.submit_supply(M["draft_id"], "MULTI_CLUSTER", live, slot)
+                    M["order_id"] = self.submit_supply(M["draft_id"], "MULTI_CLUSTER", live, slot, M)
                     break
                 except OzonError as e:
                     if "TIMESLOT_NOT_AVAILABLE" in getattr(e, "codes", ()) and attempt < 3:
@@ -1286,8 +1350,8 @@ def start(pid, bid):
         except OzonError as e:
             if r:
                 r.batch["phase"] = "stopped" if stop.is_set() else "error"
-                r.batch["error"] = str(e)
-                r.log(str(e), lvl="warn" if stop.is_set() else "error")
+                r.batch["error"] = SHUTDOWN_MSG if SHUTTING_DOWN.is_set() else str(e)
+                r.log(r.batch["error"], lvl="warn" if stop.is_set() else "error")
         except Exception as e:
             if r:
                 r._api_log(traceback.format_exc())
@@ -1310,6 +1374,47 @@ def start(pid, bid):
 def stop(bid):
     if bid in RUNNING:
         RUNNING[bid][1].set()
+
+
+SHUTTING_DOWN = threading.Event()
+SHUTDOWN_MSG = "Программа перезапускалась (обновление) — нажмите «Продолжить»"
+INTERRUPTED_MSG = "Программа была остановлена, пока создавались поставки — нажмите «Продолжить»"
+
+
+def shutdown(timeout=50):
+    """Остановка программы (Docker Up, закрытие): просим все партии остановиться и ждём, пока текущие
+    шаги доделаются — заявка, уже отправленная в Озон, дожидается своего номера. Возвращает, сколько
+    потоков не успели остановиться."""
+    SHUTTING_DOWN.set()
+    busy = [(bid, t, ev) for bid, (t, ev) in list(RUNNING.items()) if t.is_alive()]
+    for _, t, ev in busy:
+        ev.set()                         # отмена заявок флаг не смотрит — её просто ждём
+    deadline = time.time() + timeout
+    for _, t, _ in busy:
+        t.join(max(0.0, deadline - time.time()))
+    return sum(1 for _, t, _ in busy if t.is_alive())
+
+
+def mark_interrupted():
+    """При запуске: партии, которые создавались или отменялись, когда программу остановили, —
+    иначе они навсегда «создаются» без кнопки «Продолжить»."""
+    n = 0
+    for p in ST.load_profiles()["profiles"]:
+        for b in ST.list_batches(p["id"]):
+            ph = b.get("phase")
+            if ph in ("drafts", "supplies", "cargo"):
+                b["phase"], b["error"], b["interrupted"] = "stopped", INTERRUPTED_MSG, True
+                msg = INTERRUPTED_MSG
+            elif ph == "cancelling":
+                b["phase"] = "partial"
+                b["error"] = msg = ("Отмена заявок прервалась: программа была остановлена. "
+                                    "Нажмите «Сверить с Озоном» и при необходимости отмените ещё раз")
+            else:
+                continue
+            b.setdefault("log", []).append({"t": time.strftime("%H:%M:%S"), "city": "", "msg": msg, "lvl": "warn"})
+            ST.save_batch(p["id"], b)
+            n += 1
+    return n
 
 
 def is_running(bid):

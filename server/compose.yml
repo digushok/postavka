@@ -6,6 +6,8 @@ services:
     image: ghcr.io/digushok/postavka:latest   # или номер версии, например :1.7.9
     container_name: postavka
     restart: unless-stopped
+    # при обновлении (Up) программа доделывает текущий шаг создания поставок (до ~50 с), потом выходит
+    stop_grace_period: 60s
     environment:
       TZ: Europe/Moscow
     volumes:
