@@ -356,11 +356,13 @@ def load_labels_done(pid, bid):
         return _read(os.path.join(batch_dir(pid, bid), "labels_done.json"), {})
 
 
-def set_label_done(pid, bid, gid, done):
+def set_label_done(pid, bid, gid, done, sig=None):
     with _lock:
         d = load_labels_done(pid, bid)
         if done:
             d[gid] = {"at": time.strftime("%d.%m %H:%M")}
+            if sig is not None:
+                d[gid]["sig"] = sig              # что было в файле, когда отметили
         else:
             d.pop(gid, None)
         _write(os.path.join(batch_dir(pid, bid), "labels_done.json"), d)
