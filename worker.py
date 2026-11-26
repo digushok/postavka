@@ -412,6 +412,12 @@ class Run:
                 e.codes = errs
                 raise e
             st = self.supply_status(draft_id)
+        except OzonError as e:
+            # Озон ответил отказом (4xx) — заявка точно не создана, отметку снимаем. Без ответа
+            # (обрыв связи, 5xx) отметка остаётся: при «Продолжить» программа сначала спросит Озон.
+            if e.status and 400 <= int(e.status) < 500 and e.status != 429:
+                holder.pop("submitting", None)
+            raise
         finally:
             self.api.stop_flag = flag
         holder.pop("submitting", None)
@@ -443,6 +449,12 @@ class Run:
             except OzonError as e:
                 if self.stop.is_set():
                     raise
+                if e.status in (400, 404):
+                    # «no active order creation process» — Озон не создавал заявку по этому черновику
+                    h.pop("submitting", None)
+                    self.log("Заявка, отправленная раньше, Озоном не создана — отправляю заново", ship)
+                    self.save()
+                    continue
                 sub["tries"] = sub.get("tries", 0) + 1
                 if sub["tries"] < 3:
                     self.save()
