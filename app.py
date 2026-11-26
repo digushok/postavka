@@ -967,6 +967,7 @@ def serve_server_mode(port):
     host = os.environ.get("HOST") or "0.0.0.0"
     os.makedirs(ST.DATA, exist_ok=True)
     migrate_clusters()
+    _mark_interrupted()
     global SERVER
     SERVER = ThreadingHTTPServer((host, port), H)
     SERVER.daemon_threads = True
@@ -978,13 +979,28 @@ def serve_server_mode(port):
         pass
     finally:
         SERVER.server_close()
+        busy = [b for b in list(W.RUNNING) if W.is_running(b)]
+        if busy:
+            print(f"Жду, пока партии доделают текущий шаг: {len(busy)}…", flush=True)
+            left = W.shutdown(int(os.environ.get("STOP_WAIT") or 50))
+            if left:
+                print(f"Не дождалась {left} — при запуске они будут отмечены «Продолжить»", flush=True)
         print("Остановлена", flush=True)
+
+
+def _mark_interrupted():
+    try:
+        n = W.mark_interrupted()
+        if n:
+            print(f"Прерванных партий: {n} — у них кнопка «Продолжить»", flush=True)
+    except Exception:
+        traceback.print_exc()
 
 
 def _stop_on_sigterm():
     """Docker останавливает контейнер сигналом SIGTERM. Python в роли главного процесса контейнера
-    его не обрабатывает — Docker ждал 10 секунд и убивал программу. Теперь она завершается сразу:
-    serve_forever прерывается, файлы данных пишутся атомарно (через .tmp), поэтому не портятся."""
+    его не обрабатывает — Docker ждал 10 секунд и убивал программу. Теперь serve_forever прерывается,
+    создаваемые партии останавливаются после текущего шага (W.shutdown), файлы пишутся атомарно."""
     import signal
 
     def stop(*_):
@@ -1015,6 +1031,7 @@ def main():
     if already_running(port):
         webbrowser.open(f"http://127.0.0.1:{port}/")
         return
+    _mark_interrupted()
     srv = None
     for p in range(port, port + 20):
         try:
@@ -1047,7 +1064,7 @@ _UPD = {"at": 0, "res": None}
 def api_update(b):
     """Проверяет на GitHub, нет ли версии новее. Без интернета или к закрытому репозиторию — просто «не удалось»."""
     if _UPD["res"] and time.time() - _UPD["at"] < 600 and not b.get("force"):
-        return _UPD["res"]
+        return dict(_UPD["res"], busy=any(W.is_running(x) for x in list(W.RUNNING)))
     url = f"https://api.github.com/repos/{REPO}/releases/latest"
     try:
         req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json",
@@ -1064,7 +1081,7 @@ def api_update(b):
     except Exception as e:
         res = {"ok": False, "error": "нет связи с GitHub"}
     _UPD.update(at=time.time(), res=res)
-    return res
+    return dict(res, busy=any(W.is_running(x) for x in list(W.RUNNING)))
 
 
 def api_ping(_):
