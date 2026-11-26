@@ -58,6 +58,7 @@ def skey(s):
 
 REPLACE = {}                 # batch_id -> [(ключ, новый cluster_id, название, повтор?)] — замены во время работы
 ADD = {}                     # batch_id -> [(поставки, товары)] — добавленные по номеру во время работы
+MERGE = {}                   # batch_id -> [(ключ несозданной, ключ поставки-получателя, "keep"|"sum")]
 
 
 def replaceable(s):
@@ -528,7 +529,7 @@ class Run:
     # по файлам составов (файлы обновляются сразу, их можно печатать не дожидаясь конца).
 
     def pipe_add(self, s):
-        if s["status"] == "done" or skey(s) in self.failed_now:
+        if s["status"] == "done" or skey(s) in self.failed_now or any(it["s"] is s for it in self.pipe):
             return
         self.pipe.append({"s": s, "stage": "order", "op": None, "chunks": None, "t": time.time()})
 
@@ -560,6 +561,14 @@ class Run:
         """Применяет замены кластеров, выбранные пользователем во время работы, и запускает эти поставки."""
         queue = REPLACE.pop(self.bid, [])
         started = False
+        for src_key, dst_key, mode in MERGE.pop(self.bid, []):
+            try:
+                if self.merge_into(src_key, dst_key, mode):
+                    started = True
+            except OzonError as e:
+                if self.stop.is_set():
+                    raise
+                self.log(f"Объединить не удалось: {e}", lvl="error")
         for ships, prods in ADD.pop(self.bid, []):
             for s in merge_import(self.batch, ships, prods):
                 self.save()
@@ -582,6 +591,129 @@ class Run:
                     self.pipe_add(s)
                     started = True
         return started
+
+    # --------------------------------------------------------- объединить несозданный кластер с другим
+    def merge_into(self, src_key, dst_key, mode):
+        """Товары поставки, которую Озон не принял (src), уходят в другую поставку партии (dst).
+        mode "keep" — грузоместа src добавляются как есть; "sum" — одинаковый товар складывается
+        в одно новое грузоместо. Если у dst заявка уже есть — меняем её состав в Озоне
+        (/v1/supply-order/content/update); если Озон не даёт — отменяем заявку dst и создаём новую."""
+        b = self.batch
+        src = next((x for x in b["shipments"] if skey(x) == src_key and not x.get("cancelled")), None)
+        dst = next((x for x in b["shipments"] if skey(x) == dst_key and not x.get("cancelled")), None)
+        if not src or not dst or src is dst:
+            raise OzonError("Поставка не найдена")
+        if src.get("order_id"):
+            raise OzonError(f"По «{src['name']}» заявка уже создана — объединять можно только несозданную")
+        add_items = dict(src.get("items_orig") or src["items"])
+        add_boxes = list(src.get("boxes_orig") or src["boxes"])
+        items = dict(dst["items"])
+        for sku, q in add_items.items():
+            items[sku] = items.get(sku, 0) + int(q)
+        boxes = [dict(x) for x in dst["boxes"]]
+        n = 0
+
+        def new_key(sku, qty):
+            nonlocal n
+            n += 1
+            return f"m{len(dst.get('merged', []))}{n:02d}-{sku}-{qty}"
+        changed = []                                   # ключи грузомест dst, которые меняются
+        for bx in add_boxes:
+            sku, qty = str(bx["sku"]), int(bx["qty"])
+            mine = [x for x in boxes if str(x["sku"]) == sku]
+            if mode == "sum" and mine:
+                t = min(mine, key=lambda x: x["qty"])  # к самому маленькому грузоместу этого товара
+                changed.append(t["key"])
+                boxes.remove(t)
+                boxes.append({"key": new_key(sku, t["qty"] + qty), "sku": sku, "qty": t["qty"] + qty})
+            else:
+                boxes.append({"key": new_key(sku, qty), "sku": sku, "qty": qty})
+        what = (f"«{src['name']}» → «{dst['name']}»: +{sum(add_items.values())} шт, "
+                + ("грузоместа как были" if mode == "keep" else "одинаковые товары в одном грузоместе"))
+        src.update({"cancelled": True, "status": "merged", "error": None, "merged_into": dst["name"]})
+        src.setdefault("warn", []).append(f"Объединена с «{dst['name']}»")
+        dst.setdefault("merged", []).append({"from": src["name"], "items": add_items, "mode": mode})
+        dst.setdefault("warn", []).append(f"Добавлены товары из «{src['name']}» ({sum(add_items.values())} шт)")
+        self.failed_now.discard(skey(dst))
+
+        if not dst.get("order_id"):                    # заявки у получателя ещё нет — просто новый состав
+            dst["items"], dst["boxes"] = items, boxes
+            dst.pop("items_orig", None)
+            dst.pop("boxes_orig", None)
+            self.log(f"Объединено: {what}", dst)
+            self.save()
+            return False
+
+        live_cargo = [k for k in dst.get("cargo_ids") or {} if k not in changed]
+        try:
+            self.update_content(dst, items)
+        except OzonError as e:
+            if self.stop.is_set():
+                raise
+            if b.get("multi") and str(dst["order_id"]) == str((b.get("order") or {}).get("order_id")):
+                src.update({"cancelled": False, "status": "error", "error": f"Объединить не удалось: {e}"})
+                dst["merged"].pop()
+                dst["warn"].pop()
+                self.save()
+                raise OzonError(f"Озон не дал изменить состав общей заявки ({e}). Отменять её ради одного "
+                                f"кластера программа не стала — выберите «Заменить кластер» другим способом")
+            self.log(f"Озон не дал изменить состав заявки «{dst['name']}» ({e}) — отменяю её и создаю новую "
+                     f"с общим составом", dst, "warn")
+            self.recreate_order(dst, items, boxes)
+            dst.setdefault("warn", []).append(
+                "Заявка пересоздана с общим составом: новый номер, таймслот и ВСЕ этикетки этой поставки — "
+                "перепечатайте их, старые не годятся")
+            self.save()
+            self.safe(dst, self.supply_fn())
+            if dst.get("order_id"):
+                self.pipe_add(dst)
+            return bool(dst.get("order_id"))
+
+        dst["items"], dst["boxes"] = items, boxes
+        if mode == "sum":
+            dst["cargo_ids"] = {}                      # грузоместа заменены — создаём все заново
+        else:
+            dst["cargo_ids"] = {k: v for k, v in (dst.get("cargo_ids") or {}).items() if k in live_cargo}
+        for f in ("labels", "cargo_pdf", "verified", "labels_per_cargo"):
+            dst.pop(f, None)
+        self.set(dst, "cargo")
+        note = ("Грузоместа этой поставки созданы заново — перепечатайте все её этикетки" if mode == "sum" else
+                "Добавлены новые грузоместа — допечатайте их этикетки (файлы составов обновятся)")
+        dst["warn"].append(note)
+        self.log(f"Объединено: {what}. Состав заявки в Озоне изменён. {note}", dst)
+        self.save()
+        self.pipe_add(dst)
+        return True
+
+    def update_content(self, s, items):
+        body = {"order_id": int(s["order_id"]), "supply_id": int(s["supply_id"]),
+                "items": [{"sku": int(k), "quantity": int(v), "quant": 1} for k, v in items.items() if int(v) > 0]}
+        r = self.api.post("/v1/supply-order/content/update", body)
+        errs = r.get("errors") or r.get("error_reasons") or []
+        if errs and not r.get("operation_id"):
+            raise OzonError("Состав не изменён: " + ", ".join(map(str, errs)))
+        st = self.api.poll("/v1/supply-order/content/update/status", {"operation_id": r["operation_id"]},
+                           lambda x: str(x.get("status") or "").upper() not in ("", "IN_PROGRESS", "UNSPECIFIED"),
+                           interval=3, timeout=300)
+        if "SUCCESS" not in str(st.get("status") or "").upper():
+            raise OzonError("Состав не изменён: " + ", ".join(map(str, st.get("errors") or [st.get("status")])))
+
+    def recreate_order(self, s, items, boxes):
+        """Отменяет заявку поставки и готовит её к созданию заново с новым составом."""
+        oid = int(s["order_id"])
+        r = self.api.post("/v1/supply-order/cancel", {"order_id": oid})
+        st = self.api.poll("/v1/supply-order/cancel/status", {"operation_id": r.get("operation_id")},
+                           lambda x: x.get("status") not in ("IN_PROGRESS", None, ""), interval=3, timeout=300)
+        if not (st.get("status") == "SUCCESS" or (st.get("result") or {}).get("is_order_cancelled")):
+            raise OzonError("Не удалось отменить прежнюю заявку: " + ", ".join(st.get("error_reasons") or [str(st.get("status"))]))
+        s.setdefault("replaced_orders", []).append(oid)
+        for f in ("order_id", "order_number", "order_state", "supply_id", "storage_name", "cargo_ids", "labels",
+                  "cargo_pdf", "verified", "labels_per_cargo", "slot", "no_slot", "draft_id", "draft_at", "slots",
+                  "slots_at", "tried_slots", "pass_done", "items_orig", "boxes_orig", "submitting"):
+            s.pop(f, None)
+        s["items"], s["boxes"] = items, boxes
+        s.update({"status": "new", "error": None})
+        self.log(f"Прежняя заявка {oid} отменена", s, "warn")
 
     def idle_until(self, path):
         """Вместо простого ожидания лимита Озона — двигаем конвейер."""
@@ -1379,7 +1511,7 @@ def start(pid, bid):
         finally:
             if r:
                 r._apilog.close()
-            if (REPLACE.get(bid) or ADD.get(bid)) and not stop.is_set():
+            if (REPLACE.get(bid) or ADD.get(bid) or MERGE.get(bid)) and not stop.is_set():
                 # замену выбрали, когда работа уже заканчивалась — запускаем ещё раз
                 threading.Timer(0.3, lambda: start(pid, bid)).start()
 
