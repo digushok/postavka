@@ -57,6 +57,7 @@ def skey(s):
 
 
 REPLACE = {}                 # batch_id -> [(ключ, новый cluster_id, название, повтор?)] — замены во время работы
+ADD = {}                     # batch_id -> [(поставки, товары)] — добавленные по номеру во время работы
 
 
 def replaceable(s):
@@ -547,6 +548,11 @@ class Run:
         """Применяет замены кластеров, выбранные пользователем во время работы, и запускает эти поставки."""
         queue = REPLACE.pop(self.bid, [])
         started = False
+        for ships, prods in ADD.pop(self.bid, []):
+            for s in merge_import(self.batch, ships, prods):
+                self.save()
+                self.pipe_add(s)
+                started = True
         for key, cid, name, retry in queue:
             try:
                 s = apply_replacement(self.batch, key, cid, name, retry)
@@ -1192,7 +1198,7 @@ class Run:
         """Черновик на несколько кластеров. Кластеры, которые Озон не принимает, исключаются."""
         ships, seen = [], set()
         for s in self.active():
-            if s.get("excluded") or str(s["cluster_id"]) in seen:
+            if s.get("excluded") or s.get("imported") or str(s["cluster_id"]) in seen:
                 continue                      # второй раз тот же кластер — пойдёт отдельной заявкой
             seen.add(str(s["cluster_id"]))
             ships.append(s)
@@ -1361,7 +1367,7 @@ def start(pid, bid):
         finally:
             if r:
                 r._apilog.close()
-            if REPLACE.get(bid) and not stop.is_set():
+            if (REPLACE.get(bid) or ADD.get(bid)) and not stop.is_set():
                 # замену выбрали, когда работа уже заканчивалась — запускаем ещё раз
                 threading.Timer(0.3, lambda: start(pid, bid)).start()
 
@@ -1486,6 +1492,188 @@ def sync_batch(pid, bid):
 RETRY_CANCEL = {"OTHER_ASYNCHRONOUS_OPERATION_IN_PROGRESS"}
 
 
+# ------------------------------------------------------------------ добавить поставку по номеру
+ACTIVE_STATES = ["DATA_FILLING", "READY_TO_SUPPLY"]
+
+
+def _digits(x):
+    return re.sub(r"\D", "", str(x or ""))
+
+
+def _list_order_ids(api, limit=1000):
+    """ID заявок магазина, которые ещё не отгружены (заполнение данных / готова к поставке)."""
+    variants = [
+        {"filter": {"states": ACTIVE_STATES}, "limit": 100, "sort_by": "ORDER_CREATION", "sort_dir": "DESC"},
+        {"filter": {"states": ACTIVE_STATES}, "limit": 100},
+    ]
+    err = None
+    for body in variants:
+        out, last = [], None
+        try:
+            while len(out) < limit:
+                r = api.post("/v3/supply-order/list", dict(body, last_id=last) if last else body)
+                ids = r.get("order_ids") or r.get("supply_order_id") or []
+                out += [int(x) for x in ids]
+                last = r.get("last_id")
+                if not ids or not last:
+                    break
+            return out
+        except OzonError as e:
+            err = e
+            if e.status not in (400, 404):
+                break
+    raise OzonError(f"Не удалось получить список заявок у Озона: {err}")
+
+
+def find_orders(api, number):
+    """Номер из кабинета/с этикетки (номер заявки), ID заявки или номер поставки → [(заявка, поставка|None)]."""
+    n = _digits(number)
+    if not n:
+        raise OzonError(f"«{number}» — не номер")
+    try:
+        r = api.post("/v3/supply-order/get", {"order_ids": [int(n)]})
+        o = next((x for x in r.get("orders") or [] if str(x.get("order_id")) == n), None)
+        if o:
+            return o, None
+    except OzonError:
+        pass                                  # не ID заявки — ищем по номеру среди заявок магазина
+    ids = _list_order_ids(api)
+    for i in range(0, len(ids), 50):
+        r = api.post("/v3/supply-order/get", {"order_ids": ids[i:i + 50]})
+        for o in r.get("orders") or []:
+            if _digits(o.get("order_number")) == n:
+                return o, None
+            for sup in o.get("supplies") or []:
+                if str(sup.get("supply_id")) == n:
+                    return o, sup
+    raise OzonError(f"Заявка {number} не найдена у Озона (ищу среди неотгруженных заявок этого магазина)")
+
+
+def _bundle_items(api, bundle_id):
+    items, last = [], None
+    for _ in range(50):
+        body = {"bundle_ids": [bundle_id], "limit": 100}
+        if last:
+            body["last_id"] = last
+        r = api.post("/v1/supply-order/bundle", body)
+        items += [x for x in r.get("items") or [] if int(x.get("quantity") or 0) > 0]
+        last = r.get("last_id")
+        if not r.get("has_next") or not last:
+            break
+    return items
+
+
+def read_supply(api, order, sup, names, products):
+    """Поставка из Озона → поставка партии: кластер, состав, грузоместа (если уже созданы в Озоне)."""
+    sid = int(sup["supply_id"])
+    ml = str(sup.get("macrolocal_cluster_id") or "")
+    name = names.get(ml) or ((sup.get("storage_warehouse") or {}).get("name")) or f"Поставка {sid}"
+    info = {}                                         # sku → {offer_id, name}
+    r = api.post("/v2/cargoes/get", {"supplies": [{"supply_id": sid}]})
+    cargoes = [c for x in r.get("supplies") or [] if int(x.get("supply_id") or sid) == sid
+               for c in x.get("cargoes") or [] if c.get("cargo_id")]
+    boxes, cargo_ids, items = [], {}, {}
+    for n, c in enumerate(cargoes, 1):
+        if not c.get("bundle_id"):
+            raise OzonError(f"Озон не показывает состав грузоместа {c['cargo_id']}")
+        its = _bundle_items(api, c["bundle_id"])
+        if len({str(x.get("sku")) for x in its}) != 1:
+            raise OzonError(f"Грузоместо {c['cargo_id']}: " + ("пустое" if not its else "в нём несколько товаров") +
+                            " — программа работает только с монокоробами")
+        sku, qty = str(its[0]["sku"]), sum(int(x.get("quantity") or 0) for x in its)
+        info.setdefault(sku, {"offer_id": its[0].get("offer_id"), "name": its[0].get("name")})
+        key = f"i{n:03d}-{sku}-{qty}"
+        boxes.append({"key": key, "sku": sku, "qty": qty})
+        cargo_ids[key] = int(c["cargo_id"])
+        items[sku] = items.get(sku, 0) + qty
+    if not cargoes:                                   # грузомест ещё нет — создаст программа
+        if not sup.get("bundle_id"):
+            raise OzonError(f"Поставка {sid}: Озон не показывает её состав")
+        for x in _bundle_items(api, sup["bundle_id"]):
+            sku = str(x.get("sku"))
+            info.setdefault(sku, {"offer_id": x.get("offer_id"), "name": x.get("name")})
+            items[sku] = items.get(sku, 0) + int(x.get("quantity") or 0)
+        if not items:
+            raise OzonError(f"Поставка {sid}: в ней нет товаров")
+        prods = {p["sku"]: p for p in products}
+        plist = [dict(prods.get(s) or {"sku": s}, sku=s) for s in items]
+        boxes = P.build_boxes({"x": items}, plist, ["x"])["x"]
+    s = {"cluster_id": ml or f"s{sid}", "cluster_name": name, "name": name, "items": items, "boxes": boxes,
+         "order_id": order.get("order_id"), "order_number": order.get("order_number"),
+         "order_state": order.get("state"), "supply_id": sid,
+         "storage_name": (sup.get("storage_warehouse") or {}).get("name"),
+         "status": "supply", "error": None, "imported": True, "pass_done": "imported",
+         "warn": [f"Добавлена по номеру {order.get('order_number') or order.get('order_id')}"
+                  + ("" if cargoes else " — грузоместа создаст программа")]}
+    if cargoes:
+        s["cargo_ids"] = cargo_ids
+        s["verified"] = len(cargoes)                  # состав взят у самого Озона
+    return s, info
+
+
+def fetch_import(pid, bid, number, batch):
+    """Находит заявку у Озона и готовит её поставки для партии. Возвращает (поставки, сведения о товарах)."""
+    api, lf = _batch_api(pid, bid)
+    try:
+        order, only = find_orders(api, number)
+        if order.get("state") == "CANCELLED":
+            raise OzonError(f"Заявка {number} отменена")
+        sups = [only] if only else [x for x in order.get("supplies") or [] if x.get("supply_id")]
+        if not sups:
+            raise OzonError(f"В заявке {number} пока нет поставок — Озон ещё не выдал их номера, попробуйте через минуту")
+        have = {str(s.get("supply_id")) for s in batch["shipments"] if s.get("supply_id") and not s.get("cancelled")}
+        names = cluster_names(api)
+        ships, info, skipped = [], {}, []
+        for sup in sups:
+            if str(sup["supply_id"]) in have:
+                skipped.append(str(sup["supply_id"]))
+                continue
+            s, inf = read_supply(api, order, sup, names, batch["products"])
+            ships.append(s)
+            for k, v in inf.items():
+                info.setdefault(k, v)
+        if not ships:
+            raise OzonError(f"Заявка {number} уже есть в этой партии")
+        return ships, info
+    finally:
+        lf.close()
+
+
+def merge_import(batch, ships, prods):
+    """Добавляет поставки в партию: уникальные ключи, новые товары, запись в журнал. Возвращает добавленные."""
+    have = {str(s.get("supply_id")) for s in batch["shipments"] if s.get("supply_id") and not s.get("cancelled")}
+    taken = {skey(x) for x in batch["shipments"]}
+    by_sku = {p["sku"]: p for p in batch["products"]}
+    out = []
+    for s in ships:
+        if str(s["supply_id"]) in have:
+            continue
+        key, n = str(s["cluster_id"]), 2
+        while key in taken:
+            key, n = f"{s['cluster_id']}#{n}", n + 1
+        s["key"] = key
+        taken.add(key)
+        have.add(str(s["supply_id"]))
+        for sku, q in s["items"].items():
+            p = by_sku.get(sku)
+            if p is None:
+                p = dict(prods.get(sku) or {}, sku=sku, qty=0)
+                p.setdefault("name", sku)
+                p.setdefault("short", "")
+                p.setdefault("box_size", None)
+                batch["products"].append(p)
+                by_sku[sku] = p
+            p["qty"] = int(p.get("qty") or 0) + int(q)
+        batch["shipments"].append(s)
+        out.append(s)
+        units = sum(s["items"].values())
+        batch.setdefault("log", []).append({
+            "t": time.strftime("%H:%M:%S"), "city": s["name"], "lvl": "info",
+            "msg": f"Добавлена поставка {s['supply_id']} (заявка {s.get('order_number') or s.get('order_id')}): "
+                   f"{units} шт, {len(s['boxes'])} грузомест" + ("" if s.get("cargo_ids") else " — создам в Озоне")})
+    return out
+
+
 def start_cancel(pid, bid, cluster_ids=None):
     """Отмена заявок в фоне. Если поставки ещё создаются — сначала останавливает создание."""
     if bid in RUNNING and RUNNING[bid][0].is_alive():
@@ -1516,6 +1704,9 @@ def _cancel_job(pid, bid, cluster_ids):
     try:
         targets = [s for s in batch["shipments"] if not s.get("cancelled")
                    and (not cluster_ids or skey(s) in cluster_ids)]
+        oids = {str(s["order_id"]) for s in targets if s.get("order_id")}
+        targets += [s for s in batch["shipments"] if not s.get("cancelled") and s not in targets
+                    and s.get("order_id") and str(s["order_id"]) in oids]   # заявка на несколько городов
         orders = {}
         for s in targets:
             if s.get("order_id"):

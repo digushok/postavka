@@ -547,6 +547,51 @@ def api_batch_replace(b):
     return _redo_shipment(b["id"], b["key"], cid, name, False)
 
 
+def api_batch_add_supply(b):
+    """Добавить в партию уже созданные в Озоне поставки по номеру заявки / поставки (несколько — через запятую)."""
+    pid = ST.get_profile()["id"]
+    bt = ST.load_batch(pid, b["id"])
+    if not bt:
+        raise OzonError("Нет такой партии")
+    if bt.get("phase") in ("cancelling", "cancelled"):
+        raise OzonError("Партия отменена — добавлять в неё нельзя")
+    numbers = [x.strip() for x in re.split(r"[,;\n]+", str(b.get("numbers") or "")) if x.strip()]
+    if not numbers:
+        raise OzonError("Введите номер заявки или поставки")
+    added, errors = [], []
+    for num in numbers:
+        try:
+            ships, info = W.fetch_import(pid, b["id"], num, bt)
+        except OzonError as e:
+            errors.append(str(e))
+            continue
+        prof = ST.get_profile()["products"]
+        miss = [k for k, v in info.items() if not v.get("offer_id") and not (prof.get(k) or {}).get("offer_id")]
+        found = lookup_products(miss) if miss else {}
+        for sku, v in info.items():
+            saved = prof.get(sku) or {}
+            v["offer_id"] = v.get("offer_id") or saved.get("offer_id") or (found.get(sku) or {}).get("offer_id")
+            v["name"] = saved.get("name") or v.get("name") or (found.get(sku) or {}).get("name") or sku
+            v["short"] = saved.get("short") or ""
+            v["box_size"] = saved.get("box_size")
+        if W.is_running(b["id"]):
+            W.ADD.setdefault(b["id"], []).append((ships, info))
+            added += [s["name"] for s in ships]
+            bt["shipments"] += ships              # только для проверки дублей в этом же запросе
+            continue
+        bt = ST.load_batch(pid, b["id"])
+        new = W.merge_import(bt, ships, info)
+        added += [s["name"] for s in new]
+        if bt.get("phase") in ("done", "cancelled"):
+            bt["phase"] = "partial"
+        ST.save_batch(pid, bt)
+    if added and not W.is_running(b["id"]) and bt.get("phase") != "await_slot":
+        W.start(pid, b["id"])
+    if not added:
+        raise OzonError("; ".join(errors) or "Ничего не добавлено")
+    return {"added": added, "errors": errors}
+
+
 def api_batch_retry(b):
     """Ещё раз попробовать создать заявку в тот же кластер."""
     return _redo_shipment(b["id"], b["key"], None, None, True)
@@ -823,7 +868,7 @@ ROUTES = {
     "/api/check": api_check, "/api/clusters": api_clusters, "/api/dropoff": api_dropoff,
     "/api/dropoff/resolve": api_dropoff_resolve, "/api/dropoff/fav": api_dropoff_fav,
     "/api/products": api_products, "/api/plan": api_plan, "/api/batch/create": api_batch_create, "/api/batches": api_batches,
-    "/api/batch": api_batch, "/api/batch/slot": api_batch_slot, "/api/batch/resume": api_batch_resume,
+    "/api/batch": api_batch, "/api/batch/slot": api_batch_slot, "/api/batch/resume": api_batch_resume, "/api/batch/add_supply": api_batch_add_supply,
     "/api/batch/stop": api_batch_stop, "/api/batch/cancel": api_batch_cancel,
     "/api/batch/rebuild": api_batch_rebuild,
     "/api/batch/ack": api_batch_ack, "/api/matrix/import": api_matrix_import, "/api/batch/rename": api_batch_rename, "/api/product_label/upload": api_product_label_upload, "/api/batch/label_done": api_batch_label_done, "/api/batch/check_labels": api_batch_check_labels,

@@ -228,7 +228,7 @@ class MockOzon:
             o = self.orders[int(oid)]
             o["polls"] += 1
             sup = [{"supply_id": s, "state": "DATA_FILLING", "macrolocal_cluster_id": self.supplies[s]["cluster"],
-                    "storage_warehouse": {"name": "Демо-склад"}}
+                    "bundle_id": f"sb-{s}", "storage_warehouse": {"name": "Демо-склад"}}
                    for s in o["supplies"]] if o["polls"] > 1 else []
             out.append({"order_id": oid, "order_number": o["order_number"], "state": o["state"], "supplies": sup})
         return {"orders": out}
@@ -266,9 +266,38 @@ class MockOzon:
                 for cid in sup["cargoes"] if cid in ids]})
         return {"supplies": out}
 
+    def m_v3_supply_order_list(self, b):
+        st = set((b.get("filter") or {}).get("states") or [])
+        ids = sorted((o for o in self.orders if not st or self.orders[o]["state"] in st), reverse=True)
+        return {"order_ids": ids, "last_id": ""}
+
+    def make_manual_order(self, cluster, items, box=None):
+        """Заявка, созданная «вручную в кабинете»: items {sku: qty}; box — по сколько штук в коробке
+        (грузоместа уже созданы), None — без грузомест. Возвращает номер заявки."""
+        with self.lock:
+            oid, sid = self._id(), 2000000000 + self._id()
+            its = [{"sku": int(s), "quantity": q} for s, q in items.items()]
+            self.supplies[sid] = {"items": its, "cargoes": {}, "cluster": cluster}
+            if box:
+                for s, q in items.items():
+                    while q > 0:
+                        n = min(box, q)
+                        q -= n
+                        self.supplies[sid]["cargoes"][self._id() + 50000000] = {"key": "m", "value": {
+                            "type": "BOX", "items": [{"offer_id": "ART-" + str(s)[-4:], "quantity": n}]}}
+            num = f"20000{oid}"
+            self.orders[oid] = {"order_id": oid, "order_number": num, "state": "DATA_FILLING",
+                                "timeslot": None, "supplies": [sid], "polls": 5}
+            return num
+
     def m_v1_supply_order_bundle(self, b):
         items = []
         for bid in b.get("bundle_ids") or []:
+            if str(bid).startswith("sb-"):          # состав всей поставки
+                for i in self.supplies[int(str(bid)[3:])]["items"]:
+                    items.append({"sku": i["sku"], "offer_id": "ART-" + str(i["sku"])[-4:], "quantity": i["quantity"],
+                                  "name": "демо"})
+                continue
             cid = int(str(bid).split("-")[1])
             for sid, sup in self.supplies.items():
                 if cid in sup["cargoes"]:
