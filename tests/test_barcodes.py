@@ -11,6 +11,8 @@ def batch():
     ships = [{"name": f"Город {i}", "items": {"111": 20}} for i in range(10)]
     ships += [{"name": "Казань", "items": {"111": 40, "222": 5}}, {"name": "Уфа", "items": {"111": 40}},
               {"name": "Москва", "items": {"111": 100}}, {"name": "Отменён", "items": {"111": 7}, "cancelled": True}]
+    for n, s in enumerate(ships):
+        s["order_id"] = 1000 + n                                      # заявки созданы
     return {"shipments": ships}
 
 
@@ -23,12 +25,22 @@ class Barcodes(unittest.TestCase):
 
     def test_failed_city_excluded(self):
         b = batch()
-        b["shipments"][10].update(status="error")                       # Казань: Озон не принял заявку
+        b["shipments"][10].update(status="error", order_id=None)        # Казань: Озон не принял заявку
         self.assertNotIn("Казань", [c for c, _ in L.barcode_plan(b, "111")])
         self.assertEqual(L.failed_cities(b, "111"), ["Казань"])
         self.assertEqual(L.barcode_plan(b, "222"), [])
         b["shipments"][10].update(status="done", order_id=7)            # после повтора — снова в файле
         self.assertIn("Казань", [c for c, _ in L.barcode_plan(b, "111")])
+
+    def test_city_in_progress_not_yet_in_file(self):
+        b = batch()
+        b["shipments"][11].update(status="draft", order_id=None)        # Уфа: заявка ещё создаётся
+        self.assertNotIn("Уфа", [c for c, _ in L.barcode_plan(b, "111")])
+        self.assertEqual(L.failed_cities(b, "111"), ["Уфа"])
+        sig = L.plan_sig(L.barcode_plan(b, "111"))
+        b["shipments"][11].update(status="supply", order_id=9)          # заявка создана — город в файле
+        self.assertIn(("Уфа", 40), L.barcode_plan(b, "111"))
+        self.assertNotEqual(L.plan_sig(L.barcode_plan(b, "111")), sig)  # «состав изменился после отметки»
 
     def test_pdf_pages_and_blanks(self):
         d = tempfile.mkdtemp()
@@ -82,6 +94,8 @@ class CargoBySku(unittest.TestCase):
                   "labels": {"111x20": pdf("u20.pdf", 1)}},           # этикетку 111x5 ещё не получили
                  {"name": "Отменён", "items": {"111": 1}, "cancelled": True, "boxes": [{"sku": "111", "qty": 1}]},
              ]}
+        for n, s in enumerate(b["shipments"]):
+            s["order_id"] = 500 + n                                   # заявки созданы
         paths, missing = L.cargo_plan(b, d, "111")
         self.assertEqual([(os.path.basename(p), q) for p, q in paths],
                          [("k20.pdf", 20), ("u20.pdf", 20), ("m20.pdf", 20), ("m5.pdf", 5)])

@@ -693,7 +693,10 @@ def api_batch_label_done(b):
     pid = ST.get_profile()["id"]
     if not ST.load_batch(pid, b["id"]):
         raise OzonError("Нет такой партии")
-    return {"labels_done": ST.set_label_done(pid, b["id"], str(b["group"]), bool(b.get("done")))}
+    bt = ST.load_batch(pid, b["id"])
+    gid = str(b["group"])
+    sig = L.plan_sig(L.barcode_plan(bt, gid[4:])) if gid.startswith("sku:") else None
+    return {"labels_done": ST.set_label_done(pid, b["id"], gid, bool(b.get("done")), sig)}
 
 
 def _sku(v):
@@ -741,8 +744,8 @@ def _barcodes_view(pid, b):
         out.append({"sku": str(p["sku"]), "name": p.get("short") or p.get("name") or str(p["sku"]),
                     "offer_id": p.get("offer_id"), "units": sum(q for _, q in plan), "cities": len(plan),
                     "has_label": os.path.isfile(ST.product_label_path(pid, p["sku"])),
-                    "cargo": bool(cargo), "cargo_missing": missing,
-                    "failed": L.failed_cities(b, p["sku"])})
+                    "cargo": bool(cargo), "cargo_missing": missing, "sig": L.plan_sig(plan),
+                    "plan": plan, "failed": L.failed_cities(b, p["sku"])})
     return out
 
 
