@@ -301,6 +301,54 @@ function migrateDraft(d) {
 function rowsFromTemplate(t) {
   return (t ? t.cities : []).map((c) => ({ cluster_id: c.cluster_id || null, cluster_name: c.cluster_name || null, share: +c.share || 0, match: c.match || c.cluster_name || c.name, fixed: null }));
 }
+/* ---- порядок кластеров в таблице ----
+   По умолчанию — как ниже. Если строки перетаскивали, порядок (ID кластеров) хранится в магазине
+   (profile.cluster_order) и применяется везде: шаблоны, импорт, новые кластеры, порядок заявок. */
+const DEFAULT_ORDER = ["москва", "екатеринбург", ["петербург", "спб"], "ростов", "казань", "воронеж", "уфа", "краснодар",
+  "саратов", "невинномысск", "ярославль", "тюмень", "оренбург", "пермь", "тверь", "калининград"];
+function defaultRank(name) {
+  const n = String(name || "").toLowerCase().replace(/ё/g, "е");
+  const i = DEFAULT_ORDER.findIndex((k) => [].concat(k).some((w) => n.includes(w)));
+  return i < 0 ? DEFAULT_ORDER.length : i;
+}
+function clusterOrder() {
+  // все кластеры Озона: сначала сохранённый порядок, остальные — по умолчанию (неизвестные — по алфавиту)
+  const all = (APP.clusters || []).map((c) => ({ id: String(c.id), name: c.name }));
+  const nameOf = new Map(all.map((c) => [c.id, c.name]));
+  const saved = (APP.profile.cluster_order || []).map(String).filter((id) => nameOf.has(id));
+  const inSaved = new Set(saved);
+  const rest = all.filter((c) => !inSaved.has(c.id))
+    .sort((a, b) => defaultRank(a.name) - defaultRank(b.name) || a.name.localeCompare(b.name, "ru")).map((c) => c.id);
+  if (!saved.length) return rest;
+  // кластер, которого нет в сохранённом порядке, встаёт после последнего кластера, что по умолчанию идёт раньше него
+  const out = [...saved];
+  for (const id of rest) {
+    const r = defaultRank(nameOf.get(id));
+    let at = 0;
+    for (let i = out.length - 1; i >= 0; i--) if (defaultRank(nameOf.get(out[i])) <= r) { at = i + 1; break; }
+    out.splice(at, 0, id);
+  }
+  return out;
+}
+function sortRows() {
+  const pos = new Map(clusterOrder().map((id, i) => [id, i]));
+  const rank = (r) => (r.cluster_id && pos.has(String(r.cluster_id)) ? pos.get(String(r.cluster_id)) : 1e6 + defaultRank(r.cluster_name || r.match));
+  D.rows = D.rows.map((r, i) => [r, i]).sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1]).map((x) => x[0]);
+}
+async function moveRow(key, toIndex) {
+  // строка key встаёт на место toIndex; новый порядок запоминается в магазине
+  const from = D.rows.findIndex((r) => rowKey(r) === key);
+  if (from < 0 || toIndex < 0 || toIndex >= D.rows.length || toIndex === from) return;
+  const [r] = D.rows.splice(from, 1); D.rows.splice(toIndex, 0, r);
+  const order = clusterOrder();
+  const ids = D.rows.filter((x) => x.cluster_id && order.includes(String(x.cluster_id))).map((x) => String(x.cluster_id));
+  const slots = ids.map((id) => order.indexOf(id)).sort((a, b) => a - b);
+  ids.forEach((id, i) => { order[slots[i]] = id; });
+  saveDraft(); renderDist();
+  try { await saveProfile({ cluster_order: order }); } catch (e) { toast(e.message, true); }
+  renderDistControls();
+}
+
 function bindRows() {
   // кластеры без ID (из старых шаблонов) — находим по названию; дубли убираем
   const seen = new Set();
@@ -310,6 +358,7 @@ function bindRows() {
     const k = String(r.cluster_id || "?" + (r.match || ""));
     if (seen.has(k)) return false; seen.add(k); return true;
   });
+  sortRows();
 }
 const rowKey = (r) => (r.cluster_id ? String(r.cluster_id) : "?" + (r.match || r.cluster_name || ""));
 
@@ -322,9 +371,11 @@ function renderDistControls() {
     D.rows.filter((r) => r.cluster_id).map((r) => `<option value="${esc(r.cluster_id)}" ${String(D.remCity) === String(r.cluster_id) ? "selected" : ""}>${esc(rowName(r))}</option>`).join("");
   if (![...$("#remCity").options].some((o) => o.selected)) $("#remCity").value = "largest";
   const used = new Set(D.rows.map((r) => String(r.cluster_id)));
-  const free = (APP.clusters || []).filter((c) => !used.has(String(c.id)));
+  const pos = new Map(clusterOrder().map((id, i) => [id, i]));
+  const free = (APP.clusters || []).filter((c) => !used.has(String(c.id))).sort((a, b) => (pos.get(String(a.id)) ?? 1e6) - (pos.get(String(b.id)) ?? 1e6));
   $("#addCluster").innerHTML = free.length ? `<option value="">Добавить кластер…</option>` + free.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("") : `<option value="">Все кластеры уже в таблице</option>`;
-  $("#distSub").textContent = "Меняйте доли или количество прямо в таблице — остальное пересчитается";
+  $("#distSub").textContent = "Меняйте доли или количество прямо в таблице — остальное пересчитается. Порядок кластеров — перетаскиванием за ⠿";
+  $("#orderReset").classList.toggle("hidden", !(P.cluster_order || []).length);
 }
 
 function renderDist() {
@@ -344,7 +395,8 @@ function renderDist() {
     const rt = totalOf(row);
     const actual = tot ? rt / tot * 100 : 0;
     const shareShown = r.fixed ? actual : +r.share || 0;
-    h += `<tr data-k="${esc(k)}"><td class="cl" title="${esc(rowName(r))}">${esc(rowName(r))}${r.cluster_id ? "" : ' <span class="err-text">не найден в Озоне</span>'}${r.fixed ? `<span class="manual" data-reset="${esc(k)}" title="Количество задано вручную. Нажмите, чтобы снова считать от доли">вручную ↺</span>` : ""}</td>
+    const i = D.rows.indexOf(r);
+    h += `<tr data-k="${esc(k)}"><td class="cl" title="${esc(rowName(r))}"><span class="mv"><span class="grip" draggable="true" title="Перетащите, чтобы поменять порядок">⠿</span><span class="ud"><button data-up="${esc(k)}" ${i ? "" : "disabled"} title="Выше">▲</button><button data-dn="${esc(k)}" ${i < D.rows.length - 1 ? "" : "disabled"} title="Ниже">▼</button></span></span>${esc(rowName(r))}${r.cluster_id ? "" : ' <span class="err-text">не найден в Озоне</span>'}${r.fixed ? `<span class="manual" data-reset="${esc(k)}" title="Количество задано вручную. Нажмите, чтобы снова считать от доли">вручную ↺</span>` : ""}</td>
       <td><input class="share" type="number" min="0" step="0.5" value="${+shareShown.toFixed(1)}" data-share="${esc(k)}"></td>`;
     for (const p of prods) {
       const v = row[p.sku] ?? 0;
@@ -399,12 +451,51 @@ $("#dist").addEventListener("click", async (e) => {
   if (t.dataset.del !== undefined) {
     D.rows = D.rows.filter((r) => rowKey(r) !== t.dataset.del);
     saveDraft(); replan();
+  } else if (t.dataset.up !== undefined || t.dataset.dn !== undefined) {
+    const up = t.dataset.up !== undefined, k = up ? t.dataset.up : t.dataset.dn;
+    const i = D.rows.findIndex((r) => rowKey(r) === k);
+    await moveRow(k, up ? i - 1 : i + 1);
+    const b = $(`#dist button[data-${up ? "up" : "dn"}="${CSS.escape(k)}"]`); if (b && !b.disabled) b.focus();
   } else if (t.dataset.reset !== undefined) {
     const r = D.rows.find((x) => rowKey(x) === t.dataset.reset);
     r.fixed = null; if (r.share_before !== undefined) { r.share = r.share_before; delete r.share_before; }
     saveDraft(); replan();
   }
 });
+// перетаскивание строк за ⠿
+let dragKey = null;
+$("#dist").addEventListener("dragstart", (e) => {
+  const tr = e.target.closest && e.target.closest("tr[data-k]");
+  if (!tr || !e.target.classList.contains("grip")) return;
+  dragKey = tr.dataset.k; tr.classList.add("dragging");
+  e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", dragKey);
+  e.dataTransfer.setDragImage(tr, 20, 16);
+});
+const dropMarks = () => $$("#dist tr.drop-before, #dist tr.drop-after").forEach((x) => x.classList.remove("drop-before", "drop-after"));
+$("#dist").addEventListener("dragover", (e) => {
+  if (!dragKey) return;
+  const tr = e.target.closest("tbody tr[data-k]"); if (!tr) return;
+  e.preventDefault(); dropMarks();
+  const r = tr.getBoundingClientRect();
+  tr.classList.add(e.clientY < r.top + r.height / 2 ? "drop-before" : "drop-after");
+});
+$("#dist").addEventListener("drop", async (e) => {
+  if (!dragKey) return;
+  const tr = e.target.closest("tbody tr[data-k]"); if (!tr) return;
+  e.preventDefault();
+  const after = tr.classList.contains("drop-after");
+  const key = dragKey; dragKey = null; dropMarks();
+  const from = D.rows.findIndex((r) => rowKey(r) === key);
+  let to = D.rows.findIndex((r) => rowKey(r) === tr.dataset.k) + (after ? 1 : 0);
+  if (from < to) to--;
+  await moveRow(key, to);
+});
+$("#dist").addEventListener("dragend", () => { dragKey = null; dropMarks(); $$("#dist tr.dragging").forEach((x) => x.classList.remove("dragging")); });
+$("#orderReset").onclick = async () => {
+  try { await saveProfile({ cluster_order: [] }); } catch (e) { return toast(e.message, true); }
+  sortRows(); saveDraft(); renderDistControls(); renderDist(); toast("Порядок кластеров — по умолчанию");
+};
+
 $("#dist").addEventListener("keydown", (e) => {
   if (e.key !== "Enter" || e.target.tagName !== "INPUT") return;
   e.preventDefault();

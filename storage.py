@@ -188,6 +188,7 @@ DEFAULT_SETTINGS = {
         "cities": [{"cluster_id": None, "name": n, "match": m, "share": s} for n, m, s in DEFAULT_CITIES],
     }],
     "template": "Основной",
+    "cluster_order": [],      # порядок кластеров в таблице (ID), если его меняли вручную; пусто — порядок по умолчанию
     "method": "remainder_city",
     "remainder_city": "largest",
     "timeslot": {"mode": "auto", "days_from": 2, "time_from": "10:00"},

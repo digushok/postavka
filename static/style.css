@@ -357,3 +357,16 @@ body.server #bFolder, body.server #bLabelsFolder { display: none !important; }
 /* импорт таблицы из Excel */
 .mx-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .mx-row .row { margin: 0; }
+
+/* порядок кластеров: перетаскивание за ⠿ и стрелки */
+.matrix td.cl .mv { display: inline-flex; align-items: center; gap: 2px; margin-right: 6px; vertical-align: middle; }
+.matrix td.cl .grip { cursor: grab; color: var(--muted); font-size: 15px; line-height: 1; padding: 2px 3px; border-radius: 4px; user-select: none; }
+.matrix td.cl .grip:hover { color: var(--accent); background: var(--field); }
+.matrix td.cl .ud { display: inline-flex; flex-direction: column; opacity: 0; transition: opacity .12s; }
+.matrix tbody tr:hover td.cl .ud, .matrix td.cl .ud:focus-within { opacity: 1; }
+.matrix td.cl .ud button { border: 0; background: none; padding: 0 3px; font-size: 8px; line-height: 9px; color: var(--ink2); cursor: pointer; }
+.matrix td.cl .ud button:hover:not(:disabled) { color: var(--accent); }
+.matrix td.cl .ud button:disabled { opacity: .25; cursor: default; }
+.matrix tr.dragging td { opacity: .45; }
+.matrix tr.drop-before td { box-shadow: inset 0 2px 0 var(--accent); }
+.matrix tr.drop-after td { box-shadow: inset 0 -2px 0 var(--accent); }
