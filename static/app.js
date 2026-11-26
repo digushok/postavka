@@ -656,7 +656,7 @@ $("#createBtn").onclick = async () => {
 
 /* ================= ПАРТИИ ================= */
 const PHASE = { new: ["ожидает", ""], drafts: ["создаются черновики", "run"], await_slot: ["выберите таймслот", "warn"], supplies: ["создаются заявки", "run"], cargo: ["грузоместа и этикетки", "run"], done: ["готово", "ok"], partial: ["есть ошибки", "err"], error: ["ошибка", "err"], stopped: ["остановлено", "warn"], cancelling: ["отменяются заявки…", "run"], cancelled: ["отменена", ""] };
-const SST = { new: ["ожидает", ""], draft: ["черновик…", "run"], draft_ok: ["черновик готов", ""], supply: ["заявка…", "run"], cargo: ["грузоместа…", "run"], labels: ["этикетки…", "run"], pass: ["пропуск…", "run"], done: ["готово", "ok"], error: ["ошибка", "err"], cancelled: ["отменена", ""], cancelling: ["отменяется…", "run"] };
+const SST = { new: ["ожидает", ""], draft: ["черновик…", "run"], draft_ok: ["черновик готов", ""], supply: ["заявка…", "run"], cargo: ["грузоместа…", "run"], labels: ["этикетки…", "run"], pass: ["пропуск…", "run"], done: ["готово", "ok"], error: ["ошибка", "err"], cancelled: ["отменена", ""], cancelling: ["отменяется…", "run"], merged: ["объединена", ""] };
 const tag = (m, k) => { const [t, c] = m[k] || [k, ""]; return `<span class="chip ${c}">${esc(t)}</span>`; };
 
 async function loadBatches() {
@@ -870,25 +870,59 @@ const PROMPTED = new Set();
 async function askReplace(b, s) {
   if (!s) return;
   if (!(APP.clusters || []).length) await loadClusters();
-  const inBatch = new Set(b.shipments.filter((x) => !x.cancelled && x !== s).map((x) => String(x.cluster_id)));
+  const others = b.shipments.filter((x) => !x.cancelled && x !== s);
+  const inBatch = new Set(others.map((x) => String(x.cluster_id)));
   const all = (APP.clusters || []).filter((c) => String(c.id) !== String(s.cluster_id));
   const opt = (c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`;
   const ok = await confirmBox(`<h3>Озон не принимает поставку в «${esc(s.name)}»</h3>
     <p class="err-text">${esc(s.error || "Озон отказал")}</p>
     <p>Куда отправить эти товары (${s.boxes.length} кор., ${fmt(s.boxes.reduce((a, x) => a + x.qty, 0))} шт)?</p>
     <select id="replSel" style="width:100%">
-      <optgroup label="Уже в этой партии — уйдёт отдельной заявкой">${all.filter((c) => inBatch.has(String(c.id))).map(opt).join("")}</optgroup>
+      <optgroup label="Уже в этой партии — добавить к ней или отдельной заявкой">${all.filter((c) => inBatch.has(String(c.id))).map(opt).join("")}</optgroup>
       <optgroup label="Другие кластеры">${all.filter((c) => !inBatch.has(String(c.id))).map(opt).join("")}</optgroup>
     </select>
     <p class="muted small">${b.running ? "Поставки ещё создаются — замена войдёт в этот же запуск." : "Программа сразу создаст поставку в выбранный кластер."}</p>`, "Заменить");
   const sel = $("#replSel");
   if (!ok || !sel || !sel.value) return;
   const c = all.find((x) => String(x.id) === sel.value);
+  const dsts = others.filter((x) => String(x.cluster_id) === String(c.id));
+  if (dsts.length) {                                  // кластер уже в партии — добавить к нему?
+    const d = dsts.find((x) => x.order_id) || dsts[0];
+    const units = (x) => x.boxes.reduce((a, y) => a + y.qty, 0);
+    const pick = await choiceBox(`<h3>«${esc(c.name)}» уже есть в партии</h3>
+      <p>Добавить товары «${esc(s.name)}» (${s.boxes.length} кор., ${fmt(units(s))} шт) в поставку «${esc(d.name)}» (${d.boxes.length} кор., ${fmt(units(d))} шт)${d.order_id ? ` — заявка ${esc(d.order_number || d.order_id)} уже создана, программа изменит её состав в Озоне` : ""}?</p>
+      <div class="choice">
+        <button class="btn soft" data-choice="keep"><b>Грузоместа как есть</b><span>коробки «${esc(s.name)}» добавляются к «${esc(d.name)}» без изменений — допечатать только их этикетки</span></button>
+        <button class="btn soft" data-choice="sum"><b>Сложить одинаковые товары</b><span>одинаковый товар из двух кластеров — в одно новое грузоместо (32 ГБ: 10 + 5 = 15 шт в одной коробке); этикетки «${esc(d.name)}» печатаются заново</span></button>
+        <button class="btn ghost" data-choice="separate"><b>Отдельной заявкой</b><span>в «${esc(c.name)}» уйдёт ещё одна заявка, как раньше</span></button>
+      </div>
+      ${d.order_id ? `<p class="muted small">Если Озон не даст изменить состав заявки, программа отменит заявку «${esc(d.name)}» и создаст новую с общим составом — будет новый номер, таймслот и все этикетки «${esc(d.name)}» заново. Об этом будет предупреждение.</p>` : ""}`);
+    if (!pick) return;
+    if (pick !== "separate") {
+      try {
+        const r = await api("/api/batch/merge", { id: b.id, key: skey(s), to: skey(d), mode: pick });
+        toast(`«${s.name}» → в «${d.name}»` + (r.queued ? ": войдёт в текущий запуск" : ""));
+      } catch (e) { toast(e.message, true); }
+      return showBatch(b.id);
+    }
+  }
   try {
     const r = await api("/api/batch/replace", { id: b.id, key: skey(s), cluster_id: c.id, cluster_name: c.name });
     toast(r.queued ? `«${s.name}» → «${c.name}»: замена войдёт в текущий запуск` : `«${s.name}» → «${c.name}»: создаю поставку`);
   } catch (e) { toast(e.message, true); }
   showBatch(b.id);
+}
+// окно с несколькими вариантами: кнопки с data-choice, возвращает выбранный или null
+function choiceBox(html) {
+  return new Promise((res) => {
+    const done = (v) => { $("#modal").classList.add("hidden"); $("#modalBody").removeEventListener("click", on); $("#modalNo").onclick = null; res(v); };
+    const on = (e) => { const t = e.target.closest("[data-choice]"); if (t) done(t.dataset.choice); };
+    $("#modalBody").innerHTML = html;
+    $("#modalYes").classList.add("hidden"); $("#modalNo").classList.remove("hidden"); $("#modalNo").textContent = "Отмена";
+    $("#modalBody").addEventListener("click", on);
+    $("#modalNo").onclick = () => done(null);
+    $("#modal").classList.remove("hidden");
+  }).finally(() => $("#modalYes").classList.remove("hidden"));
 }
 async function showCancelResult(b) {
   const r = b.cancel_result;

@@ -266,6 +266,20 @@ class MockOzon:
                 for cid in sup["cargoes"] if cid in ids]})
         return {"supplies": out}
 
+    def m_v1_supply_order_content_update(self, b):
+        if os.environ.get("MOCK_NO_CONTENT_UPDATE"):
+            raise KeyError("content update")             # «метод недоступен» → 400
+        sup = self.supplies[int(b["supply_id"])]
+        sup["items"] = [{"sku": int(i["sku"]), "quantity": int(i["quantity"])} for i in b["items"]]
+        op = f"cu-{self._id()}"
+        self.ops[op] = {"status": "SUCCESS", "result": {}, "polls": 0}
+        return {"operation_id": op}
+
+    def m_v1_supply_order_content_update_status(self, b):
+        op = self.ops[b["operation_id"]]
+        op["polls"] += 1
+        return {"status": "IN_PROGRESS"} if op["polls"] < 2 else {"status": "SUCCESS", "errors": []}
+
     def m_v3_supply_order_list(self, b):
         st = set((b.get("filter") or {}).get("states") or [])
         ids = sorted((o for o in self.orders if not st or self.orders[o]["state"] in st), reverse=True)

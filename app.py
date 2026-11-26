@@ -592,6 +592,25 @@ def api_batch_add_supply(b):
     return {"added": added, "errors": errors}
 
 
+def api_batch_merge(b):
+    """Товары несозданной поставки — в другую поставку этой партии (mode: keep | sum)."""
+    pid = ST.get_profile()["id"]
+    bt = ST.load_batch(pid, b["id"])
+    if not bt:
+        raise OzonError("Нет такой партии")
+    if bt.get("phase") == "cancelling":
+        raise OzonError("Сейчас отменяются заявки — дождитесь окончания")
+    mode = "sum" if b.get("mode") == "sum" else "keep"
+    W.MERGE.setdefault(b["id"], []).append((str(b["key"]), str(b["to"]), mode))
+    if W.is_running(b["id"]):
+        return {"queued": True}
+    if bt.get("phase") in ("done", "cancelled"):
+        bt["phase"] = "partial"
+        ST.save_batch(pid, bt)
+    W.start(pid, b["id"])
+    return {"started": True}
+
+
 def api_batch_retry(b):
     """Ещё раз попробовать создать заявку в тот же кластер."""
     return _redo_shipment(b["id"], b["key"], None, None, True)
@@ -868,7 +887,7 @@ ROUTES = {
     "/api/check": api_check, "/api/clusters": api_clusters, "/api/dropoff": api_dropoff,
     "/api/dropoff/resolve": api_dropoff_resolve, "/api/dropoff/fav": api_dropoff_fav,
     "/api/products": api_products, "/api/plan": api_plan, "/api/batch/create": api_batch_create, "/api/batches": api_batches,
-    "/api/batch": api_batch, "/api/batch/slot": api_batch_slot, "/api/batch/resume": api_batch_resume, "/api/batch/add_supply": api_batch_add_supply,
+    "/api/batch": api_batch, "/api/batch/slot": api_batch_slot, "/api/batch/resume": api_batch_resume, "/api/batch/add_supply": api_batch_add_supply, "/api/batch/merge": api_batch_merge,
     "/api/batch/stop": api_batch_stop, "/api/batch/cancel": api_batch_cancel,
     "/api/batch/rebuild": api_batch_rebuild,
     "/api/batch/ack": api_batch_ack, "/api/matrix/import": api_matrix_import, "/api/batch/rename": api_batch_rename, "/api/product_label/upload": api_product_label_upload, "/api/batch/label_done": api_batch_label_done, "/api/batch/check_labels": api_batch_check_labels,
