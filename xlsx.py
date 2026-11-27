@@ -17,6 +17,8 @@ import zipfile
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape
 
+import planner as P
+
 NS = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
       "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
       "pr": "http://schemas.openxmlformats.org/package/2006/relationships"}
@@ -162,8 +164,21 @@ def parse_matrix(rows):
         if not name:
             skipped.append(f"строка {i}: нет названия кластера")
             continue
+        cells, layout = {}, {}
         try:
-            cells = {sku: _num(r[j] if j < len(r) else None) for j, sku in cols}
+            for j, sku in cols:
+                v = r[j] if j < len(r) else None
+                lay = None
+                if isinstance(v, str):
+                    try:
+                        lay = P.parse_layout(v)
+                    except ValueError as e:
+                        raise TableError(str(e))
+                if lay:
+                    layout[sku] = lay
+                    cells[sku] = P.layout_total(lay)
+                else:
+                    cells[sku] = _num(v)
         except TableError as e:
             raise TableError(f"Строка {i} ({name}): {e}")
         if any(q < 0 for q in cells.values()):
@@ -172,7 +187,7 @@ def parse_matrix(rows):
             continue                                  # кластер без товара — не нужен
         if any(x["name"].lower() == low for x in out):
             raise TableError(f"Кластер «{name}» встречается дважды")
-        out.append({"name": name, "cells": cells})
+        out.append(dict({"name": name, "cells": cells}, **({"layout": layout} if layout else {})))
     if not out:
         raise TableError("В таблице нет ни одного кластера с количеством")
     products = [{"sku": sku, "qty": sum(x["cells"][sku] for x in out), "box_size": boxes.get(sku)} for _, sku in cols]
@@ -259,6 +274,7 @@ def build_template(products, clusters, all_clusters=()):
         ("3. Строка «В коробке, шт» — сколько штук в коробке. Можно оставить пустой: возьмётся из настроек товара.", 0),
         ("4. Ниже — по строке на кластер: в первом столбце название кластера Озона (как на листе «Кластеры Озона»),", 0),
         ("   в ячейках — сколько штук этого SKU едет в кластер. Пусто или 0 — не едет.", 0),
+        ("   Свои коробки — раскладкой: 10×24+14+10 = 10 коробок по 24, одна на 14, одна на 10 (264 шт).", 0),
         ("5. В программе: «Новая поставка» → «Импорт таблицы» → выберите этот файл.", 0),
         ("   Товары и таблица распределения заполнятся из файла.", 0),
     ]]

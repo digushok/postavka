@@ -42,5 +42,16 @@ class Parse(unittest.TestCase):
             X.read_table("a.xls", b"\xd0\xcf\x11\xe0")
 
 
+
+class LayoutCells(unittest.TestCase):
+    def test_layout_in_cell(self):
+        t = X.parse_matrix([[X.HEAD, "1001", "1002"], ["Москва", "10×24+14+10", 5], ["Казань", "3*20", ""]])
+        self.assertEqual(t["rows"][0]["cells"], {"1001": 264, "1002": 5})
+        self.assertEqual(t["rows"][0]["layout"], {"1001": [[10, 24], [1, 14], [1, 10]]})
+        self.assertEqual(t["rows"][1]["cells"]["1001"], 60)
+        with self.assertRaises(X.TableError):
+            X.parse_matrix([[X.HEAD, "1001"], ["Москва", "10×abc"]])
+
+
 if __name__ == "__main__":
     unittest.main()

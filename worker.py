@@ -59,6 +59,7 @@ def skey(s):
 REPLACE = {}                 # batch_id -> [(ключ, новый cluster_id, название, повтор?)] — замены во время работы
 ADD = {}                     # batch_id -> [(поставки, товары)] — добавленные по номеру во время работы
 MERGE = {}                   # batch_id -> [(ключ несозданной, ключ поставки-получателя, "keep"|"sum")]
+RELAYOUT = {}                # batch_id -> [(ключ поставки, {sku: [[коробок, шт], …]})] — свои коробки
 
 
 def replaceable(s):
@@ -561,6 +562,15 @@ class Run:
         """Применяет замены кластеров, выбранные пользователем во время работы, и запускает эти поставки."""
         queue = REPLACE.pop(self.bid, [])
         started = False
+        for key, lay in RELAYOUT.pop(self.bid, []):
+            try:
+                if self.relayout(key, lay):
+                    started = True
+            except OzonError as e:
+                if self.stop.is_set():
+                    raise
+                self.batch["error"] = f"Коробки не изменены: {e}"
+                self.log(self.batch["error"], lvl="error")
         for src_key, dst_key, mode in MERGE.pop(self.bid, []):
             try:
                 if self.merge_into(src_key, dst_key, mode):
@@ -683,6 +693,42 @@ class Run:
         self.log(f"Объединено: {what}. Состав заявки в Озоне изменён. {note}", dst)
         self.save()
         self.pipe_add(dst)
+        return True
+
+    def relayout(self, key, lay):
+        """Свои коробки у поставки: новый список грузомест по раскладке. Заявка уже создана — меняем
+        состав в Озоне (если изменилось количество) и создаём грузоместа заново."""
+        s = next((x for x in self.batch["shipments"] if skey(x) == key and not x.get("cancelled")), None)
+        if not s:
+            raise OzonError("Поставка не найдена")
+        items, boxes, n = {}, [], 0
+        for sku, rows in lay.items():
+            for q in P.layout_boxes(rows):
+                n += 1
+                boxes.append({"key": f"r{len(s.get('relayouts', []))}{n:03d}-{sku}-{q}", "sku": str(sku), "qty": int(q)})
+                items[str(sku)] = items.get(str(sku), 0) + int(q)
+        if not boxes:
+            raise OzonError("В поставке не осталось ни одной коробки")
+        txt = "; ".join(f"{sku}: " + "+".join(f"{a}×{b}" if a > 1 else str(b) for a, b in rows) for sku, rows in lay.items())
+        changed_qty = items != {k: int(v) for k, v in s["items"].items() if int(v) > 0}
+        s.setdefault("relayouts", []).append({"at": time.strftime("%d.%m %H:%M"), "layout": lay})
+        if s.get("order_id") and changed_qty:
+            self.update_content(s, items)              # не удалось — ошибка, коробки не меняются
+        s["items"], s["boxes"] = items, boxes
+        s.pop("items_orig", None)
+        s.pop("boxes_orig", None)
+        if not s.get("order_id"):
+            self.log(f"Коробки изменены: {txt}", s)
+            self.save()
+            return False
+        s["cargo_ids"] = {}
+        for f in ("labels", "cargo_pdf", "verified", "labels_per_cargo"):
+            s.pop(f, None)
+        s.setdefault("warn", []).append("Коробки изменены вручную — перепечатайте все этикетки этой поставки")
+        self.set(s, "cargo")
+        self.log(f"Коробки изменены: {txt}" + (" (состав заявки в Озоне изменён)" if changed_qty else "")
+                 + " — грузоместа создаются заново", s)
+        self.pipe_add(s)
         return True
 
     def update_content(self, s, items):
@@ -1511,7 +1557,7 @@ def start(pid, bid):
         finally:
             if r:
                 r._apilog.close()
-            if (REPLACE.get(bid) or ADD.get(bid) or MERGE.get(bid)) and not stop.is_set():
+            if (REPLACE.get(bid) or ADD.get(bid) or MERGE.get(bid) or RELAYOUT.get(bid)) and not stop.is_set():
                 # замену выбрали, когда работа уже заканчивалась — запускаем ещё раз
                 threading.Timer(0.3, lambda: start(pid, bid)).start()
 
