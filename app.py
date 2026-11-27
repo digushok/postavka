@@ -371,7 +371,8 @@ def api_plan(b):
     Количество из долей; строки с ручными количествами (fixed) берутся как есть."""
     products = _plan_products(b)
     rows = [{"cluster_id": str(r["key"]), "share": r.get("share") or 0, "name": r.get("name"),
-             "fixed": r.get("fixed")} for r in b.get("rows") or []]
+             "fixed": r.get("fixed"), "layout": r.get("layout") if r.get("fixed") else None}
+            for r in b.get("rows") or []]
     order = [r["cluster_id"] for r in rows]
     names = {r["cluster_id"]: r["name"] for r in rows}
     rem = b.get("remainder_city")
@@ -382,7 +383,7 @@ def api_plan(b):
         fixed = r.get("fixed")
         matrix[r["cluster_id"]] = ({p["sku"]: max(0, int((fixed or {}).get(p["sku"]) or 0)) for p in products}
                                    if fixed else calc[r["cluster_id"]])
-    boxes = P.build_boxes(matrix, products, order)
+    boxes = P.build_boxes(matrix, products, order, {r["cluster_id"]: r["layout"] for r in rows if r.get("layout")})
     groups = P.group_boxes(boxes, products, order, names)
     return {"matrix": matrix, "calc": calc, "unassigned": unassigned, "groups": groups,
             "boxes": {k: len(v) for k, v in boxes.items()}}
@@ -421,7 +422,7 @@ def api_batch_create(b):
     cities = [c for c in b["cities"] if c.get("cluster_id")]
     order = [str(c["cluster_id"]) for c in cities]
     matrix = {str(k): {str(s): int(q or 0) for s, q in v.items()} for k, v in b["matrix"].items()}
-    boxes = P.build_boxes(matrix, products, order)
+    boxes = P.build_boxes(matrix, products, order, {str(k): v for k, v in (b.get("layouts") or {}).items()})
     shipments = []
     for c in cities:
         cid = str(c["cluster_id"])
@@ -602,6 +603,31 @@ def api_batch_merge(b):
         raise OzonError("Сейчас отменяются заявки — дождитесь окончания")
     mode = "sum" if b.get("mode") == "sum" else "keep"
     W.MERGE.setdefault(b["id"], []).append((str(b["key"]), str(b["to"]), mode))
+    if W.is_running(b["id"]):
+        return {"queued": True}
+    if bt.get("phase") in ("done", "cancelled"):
+        bt["phase"] = "partial"
+        ST.save_batch(pid, bt)
+    W.start(pid, b["id"])
+    return {"started": True}
+
+
+def api_batch_relayout(b):
+    """Свои коробки у поставки партии: layout {sku: [[коробок, шт], …]}. Если заявка уже создана —
+    грузоместа в Озоне пересоздаются (а при другом количестве — меняется и состав заявки)."""
+    pid = ST.get_profile()["id"]
+    bt = ST.load_batch(pid, b["id"])
+    if not bt:
+        raise OzonError("Нет такой партии")
+    if bt.get("phase") == "cancelling":
+        raise OzonError("Сейчас отменяются заявки — дождитесь окончания")
+    lay = {str(k): [[int(n), int(q)] for n, q in v if int(n) > 0 and int(q) > 0] for k, v in (b.get("layout") or {}).items()}
+    s = next((x for x in bt["shipments"] if W.skey(x) == str(b["key"]) and not x.get("cancelled")), None)
+    if not s:
+        raise OzonError("Поставка не найдена")
+    if not any(lay.values()):
+        raise OzonError("В поставке не осталось ни одной коробки")
+    W.RELAYOUT.setdefault(b["id"], []).append((str(b["key"]), lay))
     if W.is_running(b["id"]):
         return {"queued": True}
     if bt.get("phase") in ("done", "cancelled"):
@@ -890,7 +916,7 @@ ROUTES = {
     "/api/check": api_check, "/api/clusters": api_clusters, "/api/dropoff": api_dropoff,
     "/api/dropoff/resolve": api_dropoff_resolve, "/api/dropoff/fav": api_dropoff_fav,
     "/api/products": api_products, "/api/plan": api_plan, "/api/batch/create": api_batch_create, "/api/batches": api_batches,
-    "/api/batch": api_batch, "/api/batch/slot": api_batch_slot, "/api/batch/resume": api_batch_resume, "/api/batch/add_supply": api_batch_add_supply, "/api/batch/merge": api_batch_merge,
+    "/api/batch": api_batch, "/api/batch/slot": api_batch_slot, "/api/batch/resume": api_batch_resume, "/api/batch/add_supply": api_batch_add_supply, "/api/batch/merge": api_batch_merge, "/api/batch/relayout": api_batch_relayout,
     "/api/batch/stop": api_batch_stop, "/api/batch/cancel": api_batch_cancel,
     "/api/batch/rebuild": api_batch_rebuild,
     "/api/batch/ack": api_batch_ack, "/api/matrix/import": api_matrix_import, "/api/batch/rename": api_batch_rename, "/api/product_label/upload": api_product_label_upload, "/api/batch/label_done": api_batch_label_done, "/api/batch/check_labels": api_batch_check_labels,

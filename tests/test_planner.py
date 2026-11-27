@@ -56,5 +56,26 @@ class T(unittest.TestCase):
         self.assertEqual(sum(g["total"] for g in groups), 14 * 7)
 
 
+
+class Layout(unittest.TestCase):
+    def test_parse(self):
+        self.assertEqual(P.parse_layout("10×24+14+10"), [[10, 24], [1, 14], [1, 10]])
+        self.assertEqual(P.parse_layout("10*24 + 14"), [[10, 24], [1, 14]])
+        self.assertEqual(P.parse_layout("3 по 20"), [[3, 20]])
+        self.assertIsNone(P.parse_layout("264"))
+        with self.assertRaises(ValueError):
+            P.parse_layout("abc+1")
+
+    def test_boxes_follow_layout(self):
+        prods = [{"sku": "1", "qty": 300, "box_size": 24}, {"sku": "2", "qty": 50, "box_size": 20}]
+        m = {"msk": {"1": 264, "2": 50}}
+        b = P.build_boxes(m, prods, ["msk"], {"msk": {"1": [[10, 24], [1, 14], [1, 10]]}})["msk"]
+        self.assertEqual([x["qty"] for x in b if x["sku"] == "1"], [24] * 10 + [14, 10])
+        self.assertEqual([x["qty"] for x in b if x["sku"] == "2"], [20, 20, 10])        # без раскладки — как раньше
+        self.assertEqual(len({x["key"] for x in b}), len(b))
+        b = P.build_boxes({"msk": {"1": 100}}, prods, ["msk"], {"msk": {"1": [[10, 24]]}})["msk"]
+        self.assertEqual([x["qty"] for x in b], [24, 24, 24, 24, 4])                   # сумма не сходится — раскладка не берётся
+
+
 if __name__ == "__main__":
     unittest.main()

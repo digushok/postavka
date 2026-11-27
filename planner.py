@@ -2,6 +2,7 @@
 
 Чистые функции без обращений к сети — их легко проверять тестами.
 """
+import re
 from fractions import Fraction
 
 METHOD_REMAINDER_CITY = "remainder_city"   # весь остаток в один город
@@ -95,10 +96,47 @@ def split_boxes(qty, box_size):
     return [box] * full + ([rest] if rest else [])
 
 
-def build_boxes(matrix, products, city_order):
+LAYOUT_RE = re.compile(r"^(\d+)\s*(?:[*xх×]|по)\s*(\d+)$", re.I)
+
+
+def parse_layout(text):
+    """Раскладка по коробкам: «10×24+14+10» = 10 коробок по 24, одна на 14, одна на 10.
+    «A×B» (или A*B, AxB, «A по B») — A коробок по B шт; число без × — одна коробка.
+    Возвращает [[коробок, шт], …] или None, если это просто число (делится по «В коробке, шт»)."""
+    s = str(text or "").strip().replace(" ", "").replace("\u00a0", "")
+    if not s or not re.search(r"[+*xх×]|по", s, re.I):
+        return None
+    out = []
+    for part in s.split("+"):
+        if not part:
+            continue
+        m = LAYOUT_RE.match(part)
+        if m:
+            n, q = int(m.group(1)), int(m.group(2))
+        elif part.isdigit():
+            n, q = 1, int(part)
+        else:
+            raise ValueError(f"не понял «{part}» — пишите так: 10×24+14+10 (10 коробок по 24, одна на 14, одна на 10)")
+        if n > 0 and q > 0:
+            out.append([n, q])
+    if not out:
+        raise ValueError("в раскладке нет ни одной коробки")
+    return out
+
+
+def layout_total(layout):
+    return sum(int(n) * int(q) for n, q in layout or [])
+
+
+def layout_boxes(layout):
+    return [int(q) for n, q in layout for _ in range(int(n))]
+
+
+def build_boxes(matrix, products, city_order, layouts=None):
     """Строит список грузомест по каждому городу.
 
-    Возвращает {cluster_id: [{key, sku, qty}]} — в каждой коробке один SKU.
+    layouts — {cluster_id: {sku: [[коробок, шт], …]}}: раскладка, заданная вручную (используется,
+    если её сумма равна количеству в ячейке). Возвращает {cluster_id: [{key, sku, qty}]} — в коробке один SKU.
     """
     info = {str(p["sku"]): p for p in products}
     result = {}
@@ -108,7 +146,11 @@ def build_boxes(matrix, products, city_order):
         n = 0
         for p in products:
             sku = str(p["sku"])
-            for q in split_boxes(matrix.get(cid, {}).get(sku, 0), info[sku].get("box_size")):
+            qty = matrix.get(cid, {}).get(sku, 0)
+            lay = ((layouts or {}).get(cid) or {}).get(sku)
+            qs = layout_boxes(lay) if lay and layout_total(lay) == int(qty or 0) else \
+                split_boxes(qty, info[sku].get("box_size"))
+            for q in qs:
                 n += 1
                 boxes.append({"key": f"b{n:03d}-{sku}-{q}", "sku": sku, "qty": q})
         result[cid] = boxes

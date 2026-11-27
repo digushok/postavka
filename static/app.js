@@ -234,7 +234,7 @@ $("#mxFile").onchange = async (e) => {
     D.rows = t.rows.map((r) => {
       const hit = findCluster(r.name);
       const total = Object.values(r.cells).reduce((a, v) => a + v, 0);
-      return { cluster_id: hit ? hit.id : null, cluster_name: hit ? hit.name : null, match: r.name, fixed: { ...r.cells },
+      return { cluster_id: hit ? hit.id : null, cluster_name: hit ? hit.name : null, match: r.name, fixed: { ...r.cells }, layout: { ...(r.layout || {}) },
                share: units ? Math.round(total / units * 1000) / 10 : 0 };
     });
     // доли округлены до десятых — остаток округления отдаём самому крупному кластеру, чтобы сумма была 100%
@@ -267,6 +267,52 @@ $("#pasteApply").onclick = async () => {
 /* ---- распределение по кластерам: одна таблица ---- */
 // D.rows: [{cluster_id, cluster_name, share, fixed}] — fixed: {sku: qty}, если количество в строке правили вручную
 const prodsOf = () => D.products.filter((p) => p.sku);
+/* ---- свои коробки: раскладка «10×24+14+10» = 10 коробок по 24, одна на 14, одна на 10 ---- */
+function parseLayout(text) {
+  const s = String(text || "").replace(/[\s\u00a0]/g, "");
+  if (!s || !/[+*xх×]|по/i.test(s)) return null;           // просто число
+  const out = [];
+  for (const part of s.split("+")) {
+    if (!part) continue;
+    const m = part.match(/^(\d+)(?:[*xх×]|по)(\d+)$/i);
+    if (m) { if (+m[1] && +m[2]) out.push([+m[1], +m[2]]); }
+    else if (/^\d+$/.test(part)) { if (+part) out.push([1, +part]); }
+    else throw new Error(`Не понял «${part}». Пишите так: 10×24+14+10 — 10 коробок по 24, одна на 14, одна на 10`);
+  }
+  if (!out.length) throw new Error("В раскладке нет ни одной коробки");
+  return out;
+}
+const layoutTotal = (l) => (l || []).reduce((a, [n, q]) => a + n * q, 0);
+const layoutCount = (l) => (l || []).reduce((a, [n]) => a + n, 0);
+const layoutText = (l) => (l || []).map(([n, q]) => (n > 1 ? `${n}×${q}` : `${q}`)).join("+");
+const cellLayout = (r, sku, qty) => { const l = r.fixed && r.layout && r.layout[sku]; return l && layoutTotal(l) === qty ? l : null; };
+/* окно «Коробки»: по каждому товару строки «коробок × по шт». Возвращает {sku: [[n, q], …]} или null */
+async function boxEditor(title, items, note) {
+  const row = (n, q) => `<div class="bx-r"><input type="number" min="0" class="bx-n" value="${n}"><span>коробок по</span><input type="number" min="0" class="bx-q" value="${q}"><span>шт</span><button class="x bx-del" title="Убрать строку">×</button></div>`;
+  const html = `<h3>${title}</h3>${note ? `<p class="muted small">${note}</p>` : ""}<div class="bx">` + items.map((it) => `<div class="bx-s" data-sku="${esc(it.sku)}">
+      <div class="bx-h"><b>${esc(it.name)}</b> <span class="muted small">SKU ${esc(it.sku)}</span><span class="bx-t muted small"></span></div>
+      <div class="bx-rows">${(it.lines.length ? it.lines : [[1, 0]]).map(([n, q]) => row(n, q)).join("")}</div>
+      <button class="link small bx-add">+ ещё размер коробки</button></div>`).join("") + `</div>`;
+  const total = () => $$("#modalBody .bx-s").forEach((sec) => {
+    const l = [...sec.querySelectorAll(".bx-r")].map((r) => [+r.querySelector(".bx-n").value || 0, +r.querySelector(".bx-q").value || 0]).filter(([n, q]) => n > 0 && q > 0);
+    const it = items.find((x) => x.sku === sec.dataset.sku);
+    const t = layoutTotal(l);
+    sec.querySelector(".bx-t").innerHTML = ` · ${layoutCount(l)} кор., <b>${fmt(t)}</b> шт` + (it.qty !== undefined && t !== it.qty ? ` <span class="warn-text">(было ${fmt(it.qty)})</span>` : "");
+  });
+  const onClick = (e) => {
+    if (e.target.classList.contains("bx-add")) { e.target.previousElementSibling.insertAdjacentHTML("beforeend", row(1, 0)); total(); }
+    if (e.target.classList.contains("bx-del")) { e.target.closest(".bx-r").remove(); total(); }
+  };
+  setTimeout(() => { $("#modalBody").addEventListener("click", onClick); $("#modalBody").addEventListener("input", total); total(); }, 0);
+  const ok = await confirmBox(html, "Сохранить");
+  $("#modalBody").removeEventListener("click", onClick); $("#modalBody").removeEventListener("input", total);
+  if (!ok) return null;
+  const out = {};
+  $$("#modalBody .bx-s").forEach((sec) => {
+    out[sec.dataset.sku] = [...sec.querySelectorAll(".bx-r")].map((r) => [+r.querySelector(".bx-n").value || 0, +r.querySelector(".bx-q").value || 0]).filter(([n, q]) => n > 0 && q > 0);
+  });
+  return out;
+}
 const totalOf = (row) => Object.values(row || {}).reduce((a, v) => a + (+v || 0), 0);
 const purchaseTotal = () => prodsOf().reduce((a, p) => a + (p.qty || 0), 0);
 const pct = (v) => (Math.round(v * 10) / 10).toLocaleString("ru-RU");
@@ -358,6 +404,7 @@ function bindRows() {
     const k = String(r.cluster_id || "?" + (r.match || ""));
     if (seen.has(k)) return false; seen.add(k); return true;
   });
+  for (const r of D.rows) if (!r.fixed) delete r.layout;      // строка снова считается от доли — свои коробки не нужны
   sortRows();
 }
 const rowKey = (r) => (r.cluster_id ? String(r.cluster_id) : "?" + (r.match || r.cluster_name || ""));
@@ -404,9 +451,10 @@ function renderDist() {
       const skuShare = buy[p.sku] ? v / buy[p.sku] * 100 : 0;
       const off = rt > 0 && buy[p.sku] && Math.abs(skuShare - actual) > 0.5;
       if (off) offCells++;
-      h += `<td><input type="number" min="0" value="${v}" data-c="${esc(k)}" data-s="${esc(p.sku)}" class="${off ? "off" : ""}" title="${off ? `Доля по этому SKU ${pct(skuShare)}%, а по кластеру ${pct(actual)}%` : ""}"></td>`;
+      const lay = cellLayout(r, p.sku, v);
+      h += `<td><input type="text" inputmode="numeric" value="${v}" data-c="${esc(k)}" data-s="${esc(p.sku)}" ${lay ? `data-lay="${esc(layoutText(lay))}"` : ""} class="${off ? "off" : ""} ${lay ? "lay" : ""}" title="${lay ? `Свои коробки: ${esc(layoutText(lay))} (${layoutCount(lay)} кор.). Можно ввести раскладку, например 10×24+14+10` : off ? `Доля по этому SKU ${pct(skuShare)}%, а по кластеру ${pct(actual)}%` : "Число или раскладка по коробкам: 10×24+14+10"}"></td>`;
     }
-    h += `<td class="tot">${fmt(rt)}</td><td class="boxes">${fmt((PLAN?.boxes || {})[k] || 0)}</td><td><button class="x" data-del="${esc(k)}" title="Убрать кластер">×</button></td></tr>`;
+    h += `<td class="tot">${fmt(rt)}</td><td class="boxes"><button class="bx-open" data-bx="${esc(k)}" title="Коробки этого кластера: задать свои размеры">${fmt((PLAN?.boxes || {})[k] || 0)}</button></td><td><button class="x" data-del="${esc(k)}" title="Убрать кластер">×</button></td></tr>`;
   }
   const allTot = prods.reduce((a, p) => a + (col[p.sku] || 0), 0);
   const shareSum = D.rows.reduce((a, r) => a + (+r.share || 0), 0);
@@ -436,8 +484,12 @@ $("#dist").addEventListener("change", async (e) => {
     r.share = parseFloat(String(t.value).replace(",", ".")) || 0; r.fixed = null;
   } else if (t.dataset.c !== undefined) {                    // количество → строка «вручную», доля из факта
     const r = D.rows.find((x) => rowKey(x) === t.dataset.c);
+    let lay = null;
+    try { lay = parseLayout(t.value); } catch (err) { toast(err.message, true); t.value = t.dataset.lay || ""; return; }
     if (!r.fixed) r.share_before = r.share;                    // для «↺» — вернуть исходную долю
-    r.fixed = { ...((PLAN?.matrix || {})[t.dataset.c] || {}) }; r.fixed[t.dataset.s] = num(t.value);
+    r.fixed = { ...((PLAN?.matrix || {})[t.dataset.c] || {}) }; r.fixed[t.dataset.s] = lay ? layoutTotal(lay) : num(t.value);
+    r.layout = r.layout || {};
+    if (lay) r.layout[t.dataset.s] = lay; else delete r.layout[t.dataset.s];
     // доля строки (r.share) не меняется: от неё считаются остальные строки, и правка одной ячейки
     // не должна сдвигать количества в других кластерах. В строке показывается фактическая доля.
   } else if (t.dataset.buy !== undefined) {                  // закупка
@@ -446,8 +498,28 @@ $("#dist").addEventListener("change", async (e) => {
   } else return;
   saveDraft(); replan();
 });
+// ячейка со своими коробками: при вводе показываем раскладку, после — снова число
+$("#dist").addEventListener("focusin", (e) => { const t = e.target; if (t.dataset.lay) { t.dataset.num = t.value; t.value = t.dataset.lay; t.select(); } });
+$("#dist").addEventListener("focusout", (e) => { const t = e.target; if (t.dataset.lay && t.value === t.dataset.lay) t.value = t.dataset.num; });
 $("#dist").addEventListener("click", async (e) => {
   const t = e.target;
+  const bx = e.target.closest("[data-bx]");
+  if (bx) {                                                    // окно «Коробки» кластера
+    const r = D.rows.find((x) => rowKey(x) === bx.dataset.bx); if (!r) return;
+    const row = (PLAN?.matrix || {})[bx.dataset.bx] || {};
+    const items = prodsOf().filter((p) => row[p.sku] > 0 || cellLayout(r, p.sku, row[p.sku] || 0)).map((p) => {
+      const q = row[p.sku] || 0, lay = cellLayout(r, p.sku, q);
+      const box = +p.box_size || 0, auto = !box ? [[1, q]] : [[Math.floor(q / box), box], [1, q % box]].filter(([n, x]) => n && x);
+      return { sku: p.sku, name: prodLabel(p), qty: q, lines: lay || auto };
+    });
+    if (!items.length) return toast("В этом кластере нет товаров");
+    const res = await boxEditor(`Коробки: ${esc(rowName(r))}`, items, "Сколько коробок и по сколько штук. Количество в кластере станет равным сумме коробок.");
+    if (!res) return;
+    if (!r.fixed) r.share_before = r.share;
+    r.fixed = { ...row }; r.layout = r.layout || {};
+    for (const [sku, l] of Object.entries(res)) { r.fixed[sku] = layoutTotal(l); if (l.length) r.layout[sku] = l; else delete r.layout[sku]; }
+    saveDraft(); replan(); return;
+  }
   if (t.dataset.del !== undefined) {
     D.rows = D.rows.filter((r) => rowKey(r) !== t.dataset.del);
     saveDraft(); replan();
@@ -551,7 +623,7 @@ const replan = debounce(async () => {
   bindRows();
   const body = {
     products: prodsOf().map((p) => ({ ...p, short: prodLabel(p) })), mode: D.mode, method: D.method, remainder_city: D.remCity,
-    rows: D.rows.map((r) => ({ key: rowKey(r), share: r.share, name: rowName(r), fixed: r.fixed })),
+    rows: D.rows.map((r) => ({ key: rowKey(r), share: r.share, name: rowName(r), fixed: r.fixed, layout: r.fixed ? r.layout : null })),
   };
   try {
     PLAN = await api("/api/plan", body);
@@ -644,6 +716,8 @@ $("#createBtn").onclick = async () => {
       products: prods.map((p) => ({ sku: p.sku, qty: p.qty, name: p.name, short: prodLabel(p), box_size: p.box_size || null })),
       cities: used.map((r) => ({ cluster_id: String(r.cluster_id), name: rowName(r), cluster_name: rowName(r) })),
       matrix: Object.fromEntries(used.map((r) => [String(r.cluster_id), M[rowKey(r)]])),
+      layouts: Object.fromEntries(used.filter((r) => r.fixed && r.layout).map((r) => [String(r.cluster_id),
+        Object.fromEntries(Object.entries(r.layout).filter(([sku, l]) => layoutTotal(l) === (M[rowKey(r)] || {})[sku]))])),
       mode: D.tsmode, slot_pref: { date: D.ts.d1, time: D.ts.t1 || "10:00" },
       dropoff: D.dropoff, pass: Object.assign({}, APP.profile.pass || {}, { enabled: D.passOn }), multi: !!D.multi,
       source: JSON.parse(JSON.stringify(D)),
@@ -731,7 +805,7 @@ function renderBatch(b) {
   h += `<div class="card"><div class="card-h"><div><h2>Поставки</h2></div></div><div class="scroll"><table class="grid"><thead><tr><th>Кластер</th><th>По данным Озона</th><th>Статус</th><th>Заявка</th><th class="r">Коробок</th><th class="r">Шт</th><th>Таймслот</th><th>Примечания</th><th></th></tr></thead><tbody>` +
     ships.map((s) => { const cl = s.actual_cluster || s.ozon_cluster_name || s.cluster_name || "—"; return `<tr class="${s.mismatch && !s.cancelled ? "mismatch" : ""} ${s.cancelled ? "dim" : ""}"><td><b>${esc(s.name)}</b>${s.imported ? ' <span class="chip plain" title="Поставка создана не этой партией — добавлена по номеру">добавлена</span>' : ""}</td><td class="small">${esc(cl)}${s.mismatch ? ' <span class="err-text">не тот кластер!</span>' : ""}</td><td>${tag(SST, s.status)}</td><td>${esc(s.order_number || s.order_id || "—")}</td><td class="r">${s.boxes.length}</td><td class="r">${fmt(units(s))}</td><td class="small">${s.slot ? esc(humanSlot(s.slot)) : s.no_slot && s.order_id ? '<span class="warn-text">без таймслота</span>' : "—"}</td>
       <td>${typeof s.verified === "number" ? `<div class="good small">✓ состав подтверждён Озоном</div>` : ""}${s.error ? `<div class="err-text">${esc(s.error)}</div>` : ""}${(s.warn || []).map((w) => `<div class="warn-text">${esc(w)}</div>`).join("")}</td>
-      <td class="r">${!busy && (!b.multi || s.imported) && s.order_id && !s.cancelled ? `<button class="btn danger sm" data-cancel="${esc(skey(s))}">Отменить</button>` : ""}${canReplace(s) && b.phase !== "cancelling" ? `<span class="row-acts"><button class="btn soft sm icon-sm" data-retry="${esc(skey(s))}" title="Повторить попытку в этот же кластер" aria-label="Повторить попытку"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg></button><button class="btn soft sm" data-repl="${esc(skey(s))}">Заменить кластер</button></span>` : ""}</td></tr>`; }).join("") + `</tbody></table></div>${b.synced_at ? `<div class="muted small" style="margin-top:8px">Сверено с Озоном ${esc(b.synced_at)}</div>` : ""}</div>`;
+      <td class="r">${!s.cancelled && s.status !== "merged" && b.phase !== "cancelling" ? `<button class="btn soft sm" data-relay="${esc(skey(s))}" title="Задать свои коробки этой поставки">Коробки</button> ` : ""}${!busy && (!b.multi || s.imported) && s.order_id && !s.cancelled ? `<button class="btn danger sm" data-cancel="${esc(skey(s))}">Отменить</button>` : ""}${canReplace(s) && b.phase !== "cancelling" ? `<span class="row-acts"><button class="btn soft sm icon-sm" data-retry="${esc(skey(s))}" title="Повторить попытку в этот же кластер" aria-label="Повторить попытку"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg></button><button class="btn soft sm" data-repl="${esc(skey(s))}">Заменить кластер</button></span>` : ""}</td></tr>`; }).join("") + `</tbody></table></div>${b.synced_at ? `<div class="muted small" style="margin-top:8px">Сверено с Озоном ${esc(b.synced_at)}</div>` : ""}</div>`;
 
   h += barcodesCard(b);
   const groups = b.groups || [];
@@ -770,6 +844,25 @@ function renderBatch(b) {
     showBatch(b.id);
   });
   $$("[data-repl]").forEach((el) => (el.onclick = () => askReplace(b, ships.find((x) => skey(x) === el.dataset.repl))));
+  $$("[data-relay]").forEach((el) => (el.onclick = async () => {
+    const s = ships.find((x) => skey(x) === el.dataset.relay); if (!s) return;
+    const by = {};
+    for (const x of s.boxes) { const m = (by[x.sku] = by[x.sku] || {}); m[x.qty] = (m[x.qty] || 0) + 1; }
+    const items = Object.entries(by).map(([sku, m]) => {
+      const p = b.products.find((y) => y.sku === sku) || {};
+      return { sku, name: p.short || p.name || sku, qty: +s.items[sku] || 0,
+               lines: Object.entries(m).sort((a, z) => z[0] - a[0]).map(([q, n]) => [n, +q]) };
+    });
+    const res = await boxEditor(`Коробки: ${esc(s.name)}`, items, s.order_id
+      ? "Заявка уже создана: грузоместа этой поставки будут созданы в Озоне заново — <b>все её этикетки нужно перепечатать</b>. Если изменится количество, программа изменит и состав заявки (если Озон не даст — коробки не поменяются, будет ошибка)."
+      : "Заявка ещё не создана — коробки просто заменятся.");
+    if (!res) return;
+    try {
+      const r = await api("/api/batch/relayout", { id: b.id, key: skey(s), layout: res });
+      toast(r.queued ? "Коробки изменятся в текущем запуске" : "Меняю коробки…");
+    } catch (e) { toast(e.message, true); }
+    showBatch(b.id);
+  }));
   $("#bAddSup") && ($("#bAddSup").onclick = async () => {
     promptBox._v = "";
     const ok = await confirmBox(`<h3>Добавить поставку по номеру</h3>

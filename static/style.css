@@ -375,3 +375,15 @@ body.server #bFolder, body.server #bLabelsFolder { display: none !important; }
 .choice { display: grid; gap: 8px; margin: 12px 0 4px; }
 .choice .btn { display: flex; flex-direction: column; align-items: flex-start; text-align: left; height: auto; padding: 10px 14px; white-space: normal; gap: 2px; }
 .choice .btn span { font-weight: 400; font-size: 12.5px; color: var(--ink2); }
+
+/* свои коробки */
+.matrix td input.lay { box-shadow: inset 0 -2px 0 var(--accent); font-weight: 600; }
+.matrix td.boxes .bx-open { border: 0; background: none; color: var(--accent); font: inherit; font-weight: 600; cursor: pointer; padding: 2px 6px; border-radius: 6px; }
+.matrix td.boxes .bx-open:hover { background: var(--field); }
+.bx { display: grid; gap: 14px; margin-top: 10px; max-height: 60vh; overflow: auto; }
+.bx-h { margin-bottom: 6px; }
+.bx-r { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+.bx-r input { width: 72px; text-align: right; }
+.bx-r span { color: var(--ink2); font-size: 13px; }
+.bx .bx-add { border: 0; background: none; color: var(--accent); cursor: pointer; padding: 2px 0; font: inherit; font-size: 13px; }
+.bx .bx-del { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 16px; }
